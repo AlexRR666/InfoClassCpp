@@ -328,10 +328,12 @@ int main() {
     srand(time(0));
     initConsole();
     initMap();
+    
     while (true) {
         update();
         draw();
         Sleep(80);
     }
-    return 0;
+    
+	return 0;
 }¡£ 
