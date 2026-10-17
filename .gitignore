@@ -16,6 +16,7 @@ out/
 *.so
 *.mp4
 *.rar
+*.pdf
 
 # ==========================================
 # Logs & Runtime Diagnostics
