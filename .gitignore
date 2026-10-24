@@ -4,6 +4,7 @@
 node_modules/
 jspm_packages/
 .pnpm-store/
+大闹蟠桃会/
 
 # ==========================================
 # Build Outputs & Artifacts
@@ -17,6 +18,7 @@ out/
 *.mp4
 *.rar
 *.pdf
+*.dev
 
 # ==========================================
 # Logs & Runtime Diagnostics
