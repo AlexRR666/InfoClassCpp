@@ -1,4 +1,4 @@
- #include <iostream>
+#include <iostream>
 #include <windows.h>
 #include <ctime>
 #include <cstdlib>
@@ -336,4 +336,4 @@ int main() {
     }
     
 	return 0;
-}¡£ 
+}
