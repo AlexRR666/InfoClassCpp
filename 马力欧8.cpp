@@ -28,6 +28,8 @@ struct MovingPlatform {
     int speed;
     int range;
     bool horizontal;
+    int coinOffsetX;
+    bool hasCoin;
 };
 const int MAX_MP = 20;
 MovingPlatform mps[MAX_MP];
@@ -178,40 +180,71 @@ void findSafeSpot(int &outX, int &outY, int centerX) {
 
 void initTowerMap() {
     curMapW = 60;
-    curMapH = 600;
+    curMapH = 400;
     camX = 0;
-    camY = 580;
+    camY = 380;
 
     for (int y = 0; y < curMapH; y++)
         for (int x = 0; x < curMapW; x++)
             map[y][x] = ' ';
 
-    fillRect('#', 0, 598, 59, 599);
+    fillRect('#', 0, 398, 11, 399);
+    fillRect('#', 24, 398, 35, 399);
+    fillRect('#', 48, 398, 59, 399);
 
-    int wMin = isEasyMode ? 8 : 6;
-    int gapMin = isEasyMode ? 4 : 5;
-
-    struct Layer { int cx; int y; int w; };
-    vector<Layer> layers;
+    int gap = isEasyMode ? 3 : 4;
+    int ly = 394;
     int lastCX = 30;
-    int ly = 592;
+    int layerIndex = 0;
+    int mpPlaced = 0;
+    bool lastWasSolid = false;
+
+    struct Layer { int cx; int y; int w; char ch; };
+    vector<Layer> layers;
+
     while (ly > 12) {
-        int w = wMin + rand() % 4;
-        int cx = lastCX + (rand() % 7 - 3);
-        int half = w / 2;
-        if (cx - half < 1) cx = half + 1;
-        if (cx + half > curMapW - 2) cx = curMapW - 2 - half;
-        int x1 = cx - half;
-        fillRect('#', x1, ly, x1 + w - 1, ly);
-        Layer L;
-        L.cx = cx; L.y = ly; L.w = w;
-        layers.push_back(L);
-        lastCX = cx;
-        ly -= gapMin + rand() % 3;
+        bool useMP = (mpPlaced < 16 && layerIndex % 7 == 3);
+
+        if (useMP) {
+            int len = 7 + rand() % 4;
+            int mx = 10 + rand() % (curMapW - 10 - len - 10);
+            MovingPlatform mp;
+            mp.x = mx; mp.y = ly;
+            mp.startX = mx; mp.startY = ly;
+            mp.len = len;
+            mp.dir = 1; mp.moveTimer = 0;
+            mp.speed = 4;
+            mp.range = 10;
+            mp.horizontal = true;
+            mp.coinOffsetX = rand() % len;
+            mp.hasCoin = true;
+            mps[mpCount++] = mp;
+            mpPlaced++;
+            totalCoins++;
+            lastCX = mx + len / 2;
+            lastWasSolid = false;
+        } else {
+            bool solid = (layerIndex > 0) && !lastWasSolid && (rand() % 5 == 0);
+            int w = solid ? (4 + rand() % 3) : (10 + rand() % 4);
+            int cx = lastCX + (rand() % 3 - 1);
+            int half = w / 2;
+            if (cx - half < 1) cx = half + 1;
+            if (cx + half > curMapW - 2) cx = curMapW - 2 - half;
+            int x1 = cx - half;
+            char ch = solid ? '#' : '=';
+            fillRect(ch, x1, ly, x1 + w - 1, ly);
+            Layer L;
+            L.cx = cx; L.y = ly; L.w = w; L.ch = ch;
+            layers.push_back(L);
+            lastCX = cx;
+            lastWasSolid = solid;
+        }
+        ly -= gap;
+        layerIndex++;
     }
 
-    fillRect('#', 22, 8, 38, 8);
-    fillRect('#', 15, 15, 45, 15);
+    fillRect('=', 22, 8, 38, 8);
+    fillRect('=', 15, 11, 45, 11);
     map[7][30] = 'S';
 
     int totalLayers = (int)layers.size();
@@ -248,7 +281,7 @@ void initTowerMap() {
         }
     }
 
-    int targetMonsters = isEasyMode ? (20 + rand() % 9) : (30 + rand() % 9);
+    int targetMonsters = 12;
     for (int i = 0; i < totalLayers; i++) {
         int j = rand() % totalLayers;
         int tmp = idx[i]; idx[i] = idx[j]; idx[j] = tmp;
@@ -373,6 +406,8 @@ void initMap() {
         mp.speed = 4 + rand() % 3;
         mp.range = range;
         mp.horizontal = h;
+        mp.coinOffsetX = rand() % len;
+        mp.hasCoin = true;
         mps[mpCount++] = mp;
     }
 
@@ -423,9 +458,11 @@ void initMap() {
         }
     }
 
-    for (int i = 0; i < (int)spots.size(); i++) {
-        int j = rand() % spots.size();
-        pair<int, int> tmp = spots[i]; spots[i] = spots[j]; spots[j] = tmp;
+    if (!spots.empty()) {
+        for (int i = 0; i < (int)spots.size(); i++) {
+            int j = rand() % spots.size();
+            pair<int, int> tmp = spots[i]; spots[i] = spots[j]; spots[j] = tmp;
+        }
     }
 
     for (int i = 0; i < (int)spots.size() && i < 105; i++) {
@@ -638,16 +675,16 @@ void updatePlayer(int &px, int &py, int &vy, bool &onGround, bool &alive, int &r
     if (jump && !jumpPrev) {
         if (onGround || onMovingPlatform || coyote <= 5) {
             if (carrying) {
-                vy = isSpeedMode ? -11 : (isMoonMode ? -12 : -9);
+                vy = isSpeedMode ? -11 : (isMoonMode ? -12 : -5);
                 if (isP1) { p2Vy = vy; p2OnGround = false; p2CanDoubleJump = true; p2Coyote = 10; }
                 else { p1Vy = vy; p1OnGround = false; p1CanDoubleJump = true; p1Coyote = 10; }
             } else {
-                vy = isSpeedMode ? -11 : (isMoonMode ? -10 : -9);
+                vy = isSpeedMode ? -11 : (isMoonMode ? -10 : -5);
             }
             onGround = false;
             coyote = 10;
         } else if (canDoubleJump) {
-            vy = isSpeedMode ? -11 : (isMoonMode ? -10 : -9);
+            vy = isSpeedMode ? -11 : (isMoonMode ? -10 : -5);
             canDoubleJump = false;
             if (is2PMode) {
                 if (isP1 && onTeammate) p2Vy = 8;
@@ -660,26 +697,30 @@ void updatePlayer(int &px, int &py, int &vy, bool &onGround, bool &alive, int &r
     if (!onGround) {
         if (vy == 0) vy = 1;
         int step = (vy > 0) ? 1 : -1;
-        int ny = py + step;
 
-        if (ny <= 0) { py = 0; vy = 0; canDoubleJump = false; }
-        else if (step < 0) { if (isSolid(px, ny)) vy = 0; else py = ny; }
-        else {
-            bool hitPlayer = false;
-            if (is2PMode) {
-                if (isP1 && p2Alive && px == p2X && ny == p2Y) hitPlayer = true;
-                if (!isP1 && p1Alive && px == p1X && ny == p1Y) hitPlayer = true;
+        bool doMove = (step < 0) || ((gameTicks + (isP1 ? 0 : 1)) % 2 == 0);
+
+        if (doMove) {
+            int ny = py + step;
+            if (ny <= 0) { py = 0; vy = 0; canDoubleJump = false; }
+            else if (step < 0) { if (isSolid(px, ny)) vy = 0; else py = ny; }
+            else {
+                bool hitPlayer = false;
+                if (is2PMode) {
+                    if (isP1 && p2Alive && px == p2X && ny == p2Y) hitPlayer = true;
+                    if (!isP1 && p1Alive && px == p1X && ny == p1Y) hitPlayer = true;
+                }
+
+                bool hitMP = false;
+                for (int i = 0; i < mpCount; i++) {
+                    if (ny == mps[i].y && px >= mps[i].x && px < mps[i].x + mps[i].len) { hitMP = true; break; }
+                }
+
+                if (isSolid(px, ny) || isOneWay(px, ny) || hitPlayer || hitMP) {
+                    onGround = true; vy = 0;
+                    canDoubleJump = false;
+                } else py = ny;
             }
-
-            bool hitMP = false;
-            for (int i = 0; i < mpCount; i++) {
-                if (ny == mps[i].y && px >= mps[i].x && px < mps[i].x + mps[i].len) { hitMP = true; break; }
-            }
-
-            if (isSolid(px, ny) || isOneWay(px, ny) || hitPlayer || hitMP) {
-                onGround = true; vy = 0;
-                canDoubleJump = false;
-            } else py = ny;
         }
 
         if (!onGround) {
@@ -719,6 +760,15 @@ void updatePlayer(int &px, int &py, int &vy, bool &onGround, bool &alive, int &r
 
     if (map[py][px] == 'o') { map[py][px] = ' '; coins++; collectedCoins++; pScore += 10; if (isSpeedMode) timeLeft += 50; }
 
+    for (int i = 0; i < mpCount; i++) {
+        if (!mps[i].hasCoin) continue;
+        if (px == mps[i].x + mps[i].coinOffsetX && py == mps[i].y - 1) {
+            mps[i].hasCoin = false;
+            coins++; collectedCoins++; pScore += 10;
+            if (isSpeedMode) timeLeft += 50;
+        }
+    }
+
     for (int i = 0; i < monsterCount; i++) {
         if (!monsters[i].alive) continue;
         Monster &m = monsters[i];
@@ -736,7 +786,7 @@ void updatePlayer(int &px, int &py, int &vy, bool &onGround, bool &alive, int &r
             }
             if (isStomp) {
                 m.alive = false; monstersKilled++; pScore += (15 + rand() % 6); addSplat(m.x, m.y); vy = -7;
-                if (isSpeedMode) timeLeft += 100;
+                if (isSpeedMode) timeLeft += (isTowerMode ? 125 : 100);
             }
         }
     }
@@ -753,13 +803,19 @@ void resetGame() {
         for (int y = 0; y < curMapH; y++)
             for (int x = 0; x < curMapW; x++)
                 if (map[y][x] == 'o') totalCoins++;
+
+        for (int i = 0; i < mpCount; i++)
+            if (mps[i].hasCoin) totalCoins++;
     }
 
-    if (isSpeedMode) timeLeft = 60 * 25; else timeLeft = 0;
+    if (isSpeedMode) {
+        if (isTowerMode) timeLeft = 90 * 25;
+        else timeLeft = 60 * 25;
+    } else timeLeft = 0;
 
     if (isTowerMode) {
-        p1X = 30; p1Y = 597;
-        p2X = 32; p2Y = 597;
+        p1X = 30; p1Y = 397;
+        p2X = 32; p2Y = 397;
     } else {
         p1X = 2; p1Y = 2;
         p2X = 6; p2Y = 2;
@@ -819,6 +875,7 @@ void update() {
             if (p1Alive && map[p1Y][p1X] == 'S') {
                 map[p1Y][p1X] = ' ';
                 win = true;
+                if (isSpeedMode) winType = 6;    
                 if (collectedCoins >= totalCoins && monstersKilled == totalMonsters) winType = 2;
                 else if (collectedCoins >= totalCoins) winType = 1;
                 else winType = 0;
@@ -877,6 +934,7 @@ void update() {
         if (p2X > rightEdge && (isSolid(rightEdge, p2Y + 1) || isOneWay(rightEdge, p2Y + 1))) p2X = rightEdge;
     } else {
         if (p1X - camX > W * 2 / 3) camX = p1X - W * 2 / 3;
+        if (p1X - camX < W / 3) camX = p1X - W / 3;
         if (camX < 0) camX = 0;
         if (camX > curMapW - W) camX = curMapW - W;
         if (p1X >= curMapW - 5) {
@@ -898,31 +956,35 @@ void drawMenu() {
     screen += "              ==============================\n\n";
 
     if (menuState == 0) {
-        screen += "                    1. SOLO ADVENTURE\n";
-        screen += "                    2. VERSUS BATTLE\n\n\n";
-        screen += "                       Q to Quit\n";
-    } else if (menuState == 1) {
-        screen += "                    [ SELECT TERRAIN ]\n\n";
-        screen += (selectedPlayerCount == 1 ? "                       (Solo)\n\n" : "                       (Versus)\n\n");
+        screen += "                    [ SELECT MODE ]\n\n";
         screen += "                    1. Normal\n";
         screen += "                    2. Island\n";
         screen += "                    3. Tower\n\n\n";
-        screen += "                       M to Back\n";
-    } else if (menuState == 2) {
+        screen += "                       Q to Quit\n";
+    } else if (menuState == 1) {
         screen += "                    [ SELECT MODIFIER ]\n\n";
-        screen += (selectedTerrain == 0 ? "                     (Terrain: Normal)\n\n" :
-                   selectedTerrain == 1 ? "                     (Terrain: Island)\n\n" :
-                                          "                     (Terrain: Tower)\n\n");
+        screen += (selectedTerrain == 0 ? "                     (Normal)\n\n" :
+                   selectedTerrain == 1 ? "                     (Island)\n\n" :
+                                          "                     (Tower)\n\n");
         screen += "                    1. None\n";
         screen += "                    2. Speed Rush\n";
         screen += "                    3. Moon Gravity\n";
         screen += "                    4. Dark Mode\n\n";
         screen += "                       M to Back\n";
+    } else if (menuState == 2) {
+        string terrName = (selectedTerrain == 0 ? "Normal" : selectedTerrain == 1 ? "Island" : "Tower");
+        string modName = (selectedModifier == 0 ? "None" : selectedModifier == 1 ? "Speed" : selectedModifier == 2 ? "Moon" : "Dark");
+        screen += "                    [ SELECT PLAYERS ]\n\n";
+        screen += "                  " + terrName + " / " + modName + "\n\n";
+        screen += "                    1. Solo\n";
+        screen += "                    2. Versus\n\n\n";
+        screen += "                       M to Back\n";
     } else if (menuState == 3) {
         string terrName = (selectedTerrain == 0 ? "Normal" : selectedTerrain == 1 ? "Island" : "Tower");
         string modName = (selectedModifier == 0 ? "None" : selectedModifier == 1 ? "Speed" : selectedModifier == 2 ? "Moon" : "Dark");
+        string playerName = (selectedPlayerCount == 1 ? "Solo" : "Versus");
         screen += "                    [ SELECT DIFFICULTY ]\n\n";
-        screen += "                  " + terrName + " / " + modName + "\n\n";
+        screen += "                  " + terrName + " / " + modName + " / " + playerName + "\n\n";
         screen += "                    1. Easy\n";
         screen += "                    2. Hard\n\n\n";
         screen += "                       M to Back\n";
@@ -1026,6 +1088,15 @@ void drawGame() {
             }
             if (mpPrinted) continue;
 
+            bool platCoinPrinted = false;
+            for (int i = 0; i < mpCount; i++) {
+                if (mps[i].hasCoin && mps[i].y - 1 == wy && mps[i].x + mps[i].coinOffsetX == wx) {
+                    screen += "\033[38;2;255;215;0mo\033[0m";
+                    platCoinPrinted = true; break;
+                }
+            }
+            if (platCoinPrinted) continue;
+
             char c = map[wy][wx];
             if (c == '#') screen += "\033[38;2;139;69;19m#\033[0m";
             else if (c == '=') screen += "\033[38;2;255;165;0m=\033[0m";
@@ -1085,21 +1156,21 @@ int main() {
             drawMenu();
 
             if (menuState == 0) {
-                if (keyDown('1')) { selectedPlayerCount = 1; menuState = 1; Sleep(120); }
-                else if (keyDown('2')) { selectedPlayerCount = 2; menuState = 1; Sleep(120); }
+                if (keyDown('1')) { selectedTerrain = 0; menuState = 1; Sleep(120); }
+                else if (keyDown('2')) { selectedTerrain = 1; menuState = 1; Sleep(120); }
+                else if (keyDown('3')) { selectedTerrain = 2; menuState = 1; Sleep(120); }
                 else if (keyDown('Q') || keyDown('q')) return 0;
             }
             else if (menuState == 1) {
-                if (keyDown('1')) { selectedTerrain = 0; menuState = 2; Sleep(120); }
-                else if (keyDown('2')) { selectedTerrain = 1; menuState = 2; Sleep(120); }
-                else if (keyDown('3')) { selectedTerrain = 2; menuState = 2; Sleep(120); }
+                if (keyDown('1')) { selectedModifier = 0; menuState = 2; Sleep(120); }
+                else if (keyDown('2')) { selectedModifier = 1; menuState = 2; Sleep(120); }
+                else if (keyDown('3')) { selectedModifier = 2; menuState = 2; Sleep(120); }
+                else if (keyDown('4')) { selectedModifier = 3; menuState = 2; Sleep(120); }
                 else if (keyDown('M') || keyDown('m')) { menuState = 0; Sleep(120); }
             }
             else if (menuState == 2) {
-                if (keyDown('1')) { selectedModifier = 0; menuState = 3; Sleep(120); }
-                else if (keyDown('2')) { selectedModifier = 1; menuState = 3; Sleep(120); }
-                else if (keyDown('3')) { selectedModifier = 2; menuState = 3; Sleep(120); }
-                else if (keyDown('4')) { selectedModifier = 3; menuState = 3; Sleep(120); }
+                if (keyDown('1')) { selectedPlayerCount = 1; menuState = 3; Sleep(120); }
+                else if (keyDown('2')) { selectedPlayerCount = 2; menuState = 3; Sleep(120); }
                 else if (keyDown('M') || keyDown('m')) { menuState = 1; Sleep(120); }
             }
             else if (menuState == 3) {
