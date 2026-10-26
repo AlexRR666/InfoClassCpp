@@ -33,7 +33,7 @@ struct MovingPlatform {
     bool hasCoin;
     int coinMask;
 };
-const int MAX_MP = 100;
+const int MAX_MP = 200;
 MovingPlatform mps[MAX_MP];
 int mpCount = 0;
 
@@ -255,7 +255,7 @@ void initTowerMap() {
 
     if (isMovingPlatformMode) {
         while (ly > 12 && mpCount < MAX_MP) {
-            int len = 8 + rand() % 4;
+            int len = 9 + rand() % 5;
             int cx = lastCX + (rand() % 7 - 3);
             int half = len / 2;
             if (cx - half < 1) cx = half + 1;
@@ -263,7 +263,7 @@ void initTowerMap() {
             int mx = cx - half;
             if (mx < 0) mx = 0;
             if (mx + len > curMapW) mx = curMapW - len;
-            int range = 5 + rand() % 3;
+            int range = 4 + rand() % 5;
 
             MovingPlatform mp;
             mp.x = mx; mp.y = ly;
@@ -456,11 +456,11 @@ void initMap() {
         int px2 = 22;
         int lastY = GROUND_Y - 3;
         while (px2 < curMapW - 40 && mpCount < MAX_MP) {
-            int len = 4 + rand() % 3;
+            int len = 6 + rand() % 3;
             lastY += (rand() % 5 - 2);
             if (lastY > GROUND_Y - 2) lastY = GROUND_Y - 2;
             if (lastY < 6) lastY = 6;
-            int range = 3 + rand() % 3;
+            int range = 5 + rand() % 6;
 
             MovingPlatform mp;
             mp.x = px2; mp.y = lastY;
