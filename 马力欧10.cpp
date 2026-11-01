@@ -229,10 +229,10 @@ void addSplat(int x, int y) {
 
 bool isOnHiddenPhase(int mx, int my) {
     for (int i = 0; i < mpCount; i++) {
-        if (mps[i].type == 1 && !mps[i].visible) {
-            if (my == mps[i].y - 1 && mx >= mps[i].x && mx < mps[i].x + mps[i].len)
-                return true;
-        }
+        if (mps[i].visible) continue;
+        if (mps[i].type != 1 && mps[i].type != 2) continue;
+        if (my == mps[i].y - 1 && mx >= mps[i].x && mx < mps[i].x + mps[i].len)
+            return true;
     }
     return false;
 }
@@ -423,6 +423,73 @@ void initTowerMap() {
         while (placed < tm && att < tm * 20 && monsterCount < MAX_MON) {
             int pi = rand() % mpCount;
             MovingPlatform &p = mps[pi];
+            int mxx = p.x + rand() % p.len;
+            int myy = p.y - 1;
+            if (myy > 2 && mxx >= 0 && mxx < curMapW && map[myy][mxx] == ' ') {
+                bool occ = false;
+                for (int j = 0; j < monsterCount; j++)
+                    if (monsters[j].alive && monsters[j].x == mxx && monsters[j].y == myy) { occ = true; break; }
+                if (!occ) { addMonster(mxx, myy, (rand() % 2 == 0) ? 6 : 10, rand() % 4); placed++; }
+            }
+            att++;
+        }
+        totalMonsters = monsterCount;
+        return;
+    }
+
+    if (isBlinkMode) {
+        int blinkGap = isEasyMode ? 3 : 4;
+        int blinkLy = 394;
+        int blinkLastCenter = 30;
+        int blinkLayer = 0;
+
+        while (blinkLy > 12 && mpCount + 2 <= MAX_MP) {
+            int len = 5 + rand() % 3;
+            int offset = 4 + rand() % 3;
+            int leftCX  = blinkLastCenter - offset;
+            int rightCX = blinkLastCenter + offset;
+
+            if (leftCX - len / 2 < 1) leftCX = len / 2 + 1;
+            if (rightCX + len / 2 > curMapW - 2) rightCX = curMapW - 2 - len / 2;
+
+            MovingPlatform leftMp  = makeBlinkPlatform(leftCX  - len / 2, blinkLy, len);
+            MovingPlatform rightMp = makeBlinkPlatform(rightCX - len / 2, blinkLy, len);
+
+            // 层与层交替：偶数层左亮，奇数层右亮
+            bool leftVisibleFirst = (blinkLayer % 2 == 0);
+            leftMp.phaseTick  = leftVisibleFirst ? 0 : TICKS_PER_SEC;
+            leftMp.visible    = leftVisibleFirst;
+            rightMp.phaseTick = leftVisibleFirst ? TICKS_PER_SEC : 0;
+            rightMp.visible   = !leftVisibleFirst;
+
+            leftMp.hasCoin = true;
+            leftMp.coinOffsetX = rand() % len;
+            leftMp.coinMask = 1 << leftMp.coinOffsetX;
+            rightMp.hasCoin = true;
+            rightMp.coinOffsetX = rand() % len;
+            rightMp.coinMask = 1 << rightMp.coinOffsetX;
+
+            mps[mpCount++] = leftMp;
+            mps[mpCount++] = rightMp;
+
+            blinkLastCenter += (rand() % 5 - 2);
+            if (blinkLastCenter < 15) blinkLastCenter = 15;
+            if (blinkLastCenter > curMapW - 15) blinkLastCenter = curMapW - 15;
+
+            blinkLy -= blinkGap;
+            blinkLayer++;
+        }
+
+        fillRect('#', 22, 8, 38, 8);
+        fillRect('#', 15, 11, 45, 11);
+        map[7][30] = 'S';
+
+        int tm = isMonsterMode ? MAX_MON : (isEasyMode ? (8 + rand() % 5) : (10 + rand() % 8));
+        int placed = 0, att = 0;
+        while (placed < tm && att < tm * 20 && monsterCount < MAX_MON && mpCount > 0) {
+            int pi = rand() % mpCount;
+            MovingPlatform &p = mps[pi];
+            if (p.type != 1) { att++; continue; }
             int mxx = p.x + rand() % p.len;
             int myy = p.y - 1;
             if (myy > 2 && mxx >= 0 && mxx < curMapW && map[myy][mxx] == ' ') {
@@ -810,7 +877,7 @@ void initMap() {
 
     if (!isBlinkMode) {
         for (int i = 0; i < mpCount && monsterCount < MAX_MON; i++) {
-            if (mps[i].type != 1) continue;
+            if (mps[i].type != 1 && mps[i].type != 2) continue;
             if (rand() % 2 != 0) continue;
             int mxx = mps[i].x + rand() % mps[i].len;
             int myy = mps[i].y - 1;
@@ -1006,19 +1073,25 @@ void updateMovingPlatforms() {
         int dx = mp.x - oldX;
         int dy = mp.y - oldY;
         if (p1Y == oldY - 1 && p1X >= oldX && p1X < oldX + mp.len) {
-            if (!isSolid(p1X + dx, p1Y)) p1X += dx;
-            if (!isSolid(p1X, p1Y + dy)) p1Y += dy;
+            int nx = p1X + dx;
+            int ny = p1Y + dy;
+            if (nx >= 0 && nx < curMapW && !isSolid(nx, p1Y)) p1X = nx;
+            if (ny >= 0 && ny < curMapH && !isSolid(p1X, ny)) p1Y = ny;
         }
         if (is2PMode && p2Y == oldY - 1 && p2X >= oldX && p2X < oldX + mp.len) {
-            if (!isSolid(p2X + dx, p2Y)) p2X += dx;
-            if (!isSolid(p2X, p2Y + dy)) p2Y += dy;
+            int nx = p2X + dx;
+            int ny = p2Y + dy;
+            if (nx >= 0 && nx < curMapW && !isSolid(nx, p2Y)) p2X = nx;
+            if (ny >= 0 && ny < curMapH && !isSolid(p2X, ny)) p2Y = ny;
         }
         for (int j = 0; j < monsterCount; j++) {
             if (!monsters[j].alive) continue;
             if (monsters[j].falling) continue;
             if (monsters[j].y == oldY - 1 && monsters[j].x >= oldX && monsters[j].x < oldX + mp.len) {
-                monsters[j].x += dx;
-                monsters[j].y += dy;
+                int nx = monsters[j].x + dx;
+                int ny = monsters[j].y + dy;
+                if (nx >= 0 && nx < curMapW) monsters[j].x = nx;
+                if (ny >= 0 && ny < curMapH) monsters[j].y = ny;
             }
         }
     }
@@ -1084,13 +1157,25 @@ void updateMonsters() {
                 if (d1 < d2) dist = p1X - m.x;
                 else dist = p2X - m.x;
             } else dist = p1X - m.x;
-            if (hasGround(m.x, m.y) && abs(dist) <= 8 && dist != 0)
+
+            // 脚下有地：普通地面 / 单向平台 / 可见的 type==2 平台
+            auto groundAt = [&](int gx, int gy) -> bool {
+                if (hasGround(gx, gy)) return true;
+                for (int k = 0; k < mpCount; k++) {
+                    if (mps[k].type == 2 && mps[k].visible &&
+                        gy + 1 == mps[k].y && gx >= mps[k].x && gx < mps[k].x + mps[k].len)
+                        return true;
+                }
+                return false;
+            };
+
+            if (groundAt(m.x, m.y) && abs(dist) <= 8 && dist != 0)
                 m.dir = (dist > 0) ? 1 : -1;
             int nx = m.x + m.dir;
-            if (!hasGround(nx, m.y) || isSolid(nx, m.y)) {
+            if (!groundAt(nx, m.y) || isSolid(nx, m.y)) {
                 m.dir = -m.dir;
                 nx = m.x + m.dir;
-                if (!hasGround(nx, m.y) || isSolid(nx, m.y)) continue;
+                if (!groundAt(nx, m.y) || isSolid(nx, m.y)) continue;
             }
             m.x = nx;
         }
