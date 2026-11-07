@@ -1,0 +1,2131 @@
+#include <iostream>
+#include <windows.h>
+#include <mmsystem.h>
+#include <ctime>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <queue>
+#include <vector>
+using namespace std;
+
+const int W=60;
+const int H=20;
+const int MAX_MAP_W=600;
+const int MAX_MAP_H=600;
+const int NORMAL_MAP_W=600;
+const int NORMAL_MAP_H=20;
+const int GROUND_Y=H-4;
+const int TICKS_PER_SEC=25;
+const int HIDE_TICKS=75;
+
+int curMapW=NORMAL_MAP_W;
+int curMapH=NORMAL_MAP_H;
+
+struct MovingPlatform{
+    int x,y,startX,startY,len,dir,moveTimer,speed,range;
+    bool horizontal;
+    int coinOffsetX;
+    bool hasCoin;
+    int coinMask;
+    int type,life,maxLife,hiddenTimer;
+    bool visible;
+    int phaseTick;
+    bool diagonal;
+    int vx,vy;
+};
+const int MAX_MP=200;
+MovingPlatform mps[MAX_MP];
+int mpCount=0;
+
+int menuState=0;
+int selectedPlayerCount=1;
+int selectedTerrain=0;
+int selectedModifier=0;
+
+int p1X=2,p1Y=GROUND_Y-1,p1Vy=0;
+bool p1OnGround=true,p1Alive=true;
+int p1Coins=0,p1RespawnTimer=0,p1Coyote=0,p1Inv=0;
+int p1Score=0;
+bool p1CanDoubleJump=false;
+
+int p2X=4,p2Y=GROUND_Y-1,p2Vy=0;
+bool p2OnGround=true,p2Alive=true;
+int p2Coins=0,p2RespawnTimer=0,p2Coyote=0,p2Inv=0;
+int p2Score=0;
+bool p2CanDoubleJump=false;
+
+bool p1JumpPrev=false,p2JumpPrev=false;
+
+int camX=0,camY=0;
+int score=0,totalCoins=0,collectedCoins=0,totalMonsters=0,monstersKilled=0;
+bool gameOver=false,win=false;
+int winType=0;
+
+bool isEasyMode=false,isIslandMode=false,is2PMode=false;
+bool isSpeedMode=false,isDarkMode=false,isMoonMode=false;
+bool isTowerMode=false,isFallingMode=false,isMonsterMode=false;
+bool isCoinsMode=false,isMovingPlatformMode=false,isBlinkMode=false;
+
+bool isSleeping=false;
+bool pKeyPrev=false;
+
+struct FloorGapInfo{ int y; int bigCX,smallCX; };
+vector<FloorGapInfo> floorGaps;
+int lastGapX=0,lastGapY=0;
+
+bool gameStarted=false;
+int gameTicks=0;
+int timeLeft=0;
+int p1MoveTimer=0,p2MoveTimer=0;
+
+char map[MAX_MAP_H][MAX_MAP_W];
+
+struct Monster{
+    int x,y,dir;
+    bool alive;
+    int moveTimer,speed,vy;
+    bool falling;
+};
+const int MAX_MON=500;
+Monster monsters[MAX_MON];
+int monsterCount=0;
+
+struct Splat{ int x,y,timer; };
+const int MAX_SPLAT=10;
+Splat splats[MAX_SPLAT];
+int splatCount=0;
+
+HANDLE hOut;
+string currentBGM="";
+typedef BOOL(WINAPI*PSND)(LPCSTR,HMODULE,DWORD);
+PSND pPlaySound=NULL;
+
+struct Difficulty{
+    int towerGap;
+    int towerMpMonsterMin,towerMpMonsterRange;
+    int blinkMonsterMin,blinkMonsterRange;
+    int islandGapMin,islandGapMax;
+    int pitMax;
+    int normalMonsterMin,normalMonsterRange;
+    int fallingShift;
+};
+Difficulty getDifficulty(){
+    if(isEasyMode)return{3,15,11,8,5,3,5,5,15,11,3};
+    else return{4,20,11,10,8,4,7,6,20,11,4};
+}
+
+string exeDir(){
+    char buf[MAX_PATH];
+    GetModuleFileNameA(NULL,buf,MAX_PATH);
+    string s=buf;
+    size_t pos=s.find_last_of("\\/");
+    if(pos!=string::npos)s=s.substr(0,pos+1);
+    return s;
+}
+bool fileExists(const string&path){
+    return GetFileAttributesA(path.c_str())!=INVALID_FILE_ATTRIBUTES;
+}
+string findWav(const string&name){
+    string p=exeDir()+name;
+    if(fileExists(p))return p;
+    if(fileExists(name))return name;
+    return "";
+}
+void initAudio(){
+    HMODULE h=LoadLibraryA("winmm.dll");
+    if(h)pPlaySound=(PSND)GetProcAddress(h,"PlaySoundA");
+}
+void playBGM(const string&name){
+    if(currentBGM==name)return;
+    if(!pPlaySound)return;
+    string path=findWav(name);
+    if(path.empty())return;
+    pPlaySound(NULL,NULL,0);
+    currentBGM=name;
+    pPlaySound(path.c_str(),NULL,SND_ASYNC|SND_LOOP|SND_FILENAME);
+}
+void stopBGM(){
+    currentBGM="";
+    if(pPlaySound)pPlaySound(NULL,NULL,0);
+}
+void initConsole(){
+    hOut=GetStdHandle(STD_OUTPUT_HANDLE);
+    SetConsoleOutputCP(CP_UTF8);
+    CONSOLE_CURSOR_INFO cci;
+    cci.dwSize=1;
+    cci.bVisible=FALSE;
+    SetConsoleCursorInfo(hOut,&cci);
+
+    DWORD outMode=0;
+    GetConsoleMode(hOut,&outMode);
+    outMode|=0x0004;
+    SetConsoleMode(hOut,outMode);
+
+    HANDLE hIn=GetStdHandle(STD_INPUT_HANDLE);
+    DWORD inMode=0;
+    GetConsoleMode(hIn,&inMode);
+    inMode&=~ENABLE_QUICK_EDIT_MODE;
+    inMode&=~ENABLE_MOUSE_INPUT;
+    inMode|=ENABLE_EXTENDED_FLAGS;
+    SetConsoleMode(hIn,inMode);
+}
+void fillRect(char ch,int x1,int y1,int x2,int y2){
+    if(x1<0)x1=0;
+    if(x2>=curMapW)x2=curMapW-1;
+    if(y1<0)y1=0;
+    if(y2>=curMapH)y2=curMapH-1;
+    for(int y=y1;y<=y2;y++)
+        for(int x=x1;x<=x2;x++)
+            map[y][x]=ch;
+}
+bool isSolid(int x,int y){
+    if(x<0||x>=curMapW)return true;
+    if(y<0||y>=curMapH)return false;
+    return map[y][x]=='#';
+}
+bool isOneWay(int x,int y){
+    if(x<0||x>=curMapW)return false;
+    if(y<0||y>=curMapH)return false;
+    return map[y][x]=='=';
+}
+bool hasGround(int x,int y){
+    return isSolid(x,y+1)||isOneWay(x,y+1);
+}
+bool keyDown(int vk){
+    return(GetAsyncKeyState(vk)&0x8000)!=0;
+}
+void clearSpawnArea(){
+    for(int y=0;y<GROUND_Y;y++)
+        for(int x=0;x<12;x++)
+            map[y][x]=' ';
+    fillRect('#',0,GROUND_Y,15,GROUND_Y+1);
+}
+void addMonster(int x,int y,int speed,int phase){
+    if(monsterCount>=MAX_MON)return;
+    monsters[monsterCount].x=x;
+    monsters[monsterCount].y=y;
+    monsters[monsterCount].dir=(phase%2==0)?1:-1;
+    monsters[monsterCount].alive=true;
+    monsters[monsterCount].moveTimer=phase;
+    monsters[monsterCount].speed=speed;
+    monsters[monsterCount].vy=0;
+    monsters[monsterCount].falling=false;
+    monsterCount++;
+}
+void addSplat(int x,int y){
+    if(splatCount>=MAX_SPLAT)return;
+    splats[splatCount].x=x;
+    splats[splatCount].y=y;
+    splats[splatCount].timer=10;
+    splatCount++;
+}
+bool isOnHiddenPhase(int mx,int my){
+    for(int i=0;i<mpCount;i++){
+        if(mps[i].visible)continue;
+        if(mps[i].type!=1&&mps[i].type!=2)continue;
+        if(my==mps[i].y-1&&mx>=mps[i].x&&mx<mps[i].x+mps[i].len)return true;
+    }
+    return false;
+}
+void findSafeSpot(int&outX,int&outY,int centerX){
+    for(int ty=camY+H-2;ty>=camY+2;ty--){
+        for(int d=0;d<=30;d++){
+            int cx1=centerX-d;
+            int cx2=centerX+d;
+            if(cx1>=0&&cx1<curMapW&&hasGround(cx1,ty-1)){outX=cx1;outY=ty-1;return;}
+            if(d!=0&&cx2>=0&&cx2<curMapW&&hasGround(cx2,ty-1)){outX=cx2;outY=ty-1;return;}
+        }
+    }
+    outX=centerX;
+    outY=camY+H/2;
+}
+
+MovingPlatform makeBasePlatform(int mx,int my,int len){
+    MovingPlatform mp;
+    mp.x=mx; mp.y=my; mp.startX=mx; mp.startY=my; mp.len=len;
+    mp.dir=1; mp.moveTimer=0; mp.speed=0; mp.range=0; mp.horizontal=false;
+    mp.coinOffsetX=0; mp.hasCoin=false; mp.coinMask=0;
+    mp.type=0; mp.life=0; mp.maxLife=0; mp.hiddenTimer=0;
+    mp.visible=true; mp.phaseTick=0;
+    mp.diagonal=false; mp.vx=0; mp.vy=0;
+    return mp;
+}
+MovingPlatform makeNormalPlatform(int mx,int my,int len,int speed,int range,bool h){
+    MovingPlatform mp=makeBasePlatform(mx,my,len);
+    mp.speed=speed; mp.range=range; mp.horizontal=h;
+    mp.hasCoin=true;
+    return mp;
+}
+MovingPlatform makeDiagonalPlatform(int mx,int my,int len,int speed,int range){
+    MovingPlatform mp=makeNormalPlatform(mx,my,len,speed,range,false);
+    mp.diagonal=true;
+    mp.vx=(rand()%2==0)?1:-1;
+    mp.vy=(rand()%2==0)?1:-1;
+    return mp;
+}
+MovingPlatform makePhasePlatform(int mx,int my,int len,int type,bool blinkStart=false,bool clampY=true){
+    if(clampY){
+        if(my<11)my=11;
+        if(my>GROUND_Y-2)my=GROUND_Y-2;
+    }
+    MovingPlatform mp=makeBasePlatform(mx,my,len);
+    mp.type=type;
+    if(type==1){
+        if(blinkStart){ mp.phaseTick=0; mp.visible=true; }
+        else{
+            mp.phaseTick=rand()%(TICKS_PER_SEC*2);
+            mp.visible=(mp.phaseTick<TICKS_PER_SEC);
+        }
+        mp.hasCoin=blinkStart?true:(rand()%2==0);
+        if(mp.hasCoin){
+            mp.coinOffsetX=rand()%len;
+            mp.coinMask=1<<mp.coinOffsetX;
+        }
+    }else{
+        mp.phaseTick=0; mp.visible=true;
+        mp.maxLife=1+rand()%3; mp.life=mp.maxLife; mp.hiddenTimer=0;
+        mp.hasCoin=(rand()%2==0);
+        if(mp.hasCoin){
+            mp.coinOffsetX=rand()%len;
+            mp.coinMask=1<<mp.coinOffsetX;
+        }
+    }
+    return mp;
+}
+
+void recountCoins(){
+    totalCoins=0;
+    for(int y=0;y<curMapH;y++)
+        for(int x=0;x<curMapW;x++)
+            if(map[y][x]=='o')totalCoins++;
+    for(int i=0;i<mpCount;i++){
+        if(!mps[i].hasCoin)continue;
+        for(int b=0;b<mps[i].len;b++)
+            if(mps[i].coinMask&(1<<b))totalCoins++;
+    }
+}
+bool tryCollectCoin(int x,int y,int&coins,int&pScore){
+    if(x<0||x>=curMapW||y<0||y>=curMapH)return false;
+    if(map[y][x]!='o')return false;
+    map[y][x]=' ';
+    coins++; collectedCoins++; pScore+=10;
+    if(isSpeedMode)timeLeft+=50;
+    return true;
+}
+bool tryCollectPlatformCoin(int x,int y,int&coins,int&pScore){
+    for(int i=0;i<mpCount;i++){
+        if(!mps[i].hasCoin||!mps[i].visible)continue;
+        if(y!=mps[i].y-1)continue;
+        if(x<mps[i].x||x>=mps[i].x+mps[i].len)continue;
+        int bit=x-mps[i].x;
+        if(mps[i].coinMask&(1<<bit)){
+            mps[i].coinMask&=~(1<<bit);
+            if(mps[i].coinMask==0)mps[i].hasCoin=false;
+            coins++; collectedCoins++; pScore+=10;
+            if(isSpeedMode)timeLeft+=50;
+            return true;
+        }
+    }
+    return false;
+}
+
+void updateLastGap(int px,int py){
+    int bestY=-1;
+    int bestX=curMapW/2;
+    for(size_t i=0;i<floorGaps.size();i++){
+        const FloorGapInfo&g=floorGaps[i];
+        if(g.y<py&&g.y>bestY){
+            bestY=g.y;
+            if(abs(px-g.bigCX)<=abs(px-g.smallCX))bestX=g.bigCX;
+            else bestX=g.smallCX;
+        }
+    }
+    if(bestY>=0){
+        lastGapX=bestX;
+        lastGapY=bestY-1;
+    }
+}
+
+// ==================== FALLING ====================
+void initFallingMap(){
+    curMapW=60;
+    curMapH=600;
+    camX=0; camY=0;
+    floorGaps.clear();
+    mpCount=0;
+    monsterCount=0;
+
+    for(int y=0;y<curMapH;y++)
+        for(int x=0;x<curMapW;x++)
+            map[y][x]='#';
+    fillRect(' ',0,0,curMapW-1,5);
+    fillRect(' ',0,curMapH-5,curMapW-1,curMapH-1);
+
+    const int MIN_SIDE=5;
+    const int ROW_PERIOD=10;
+    const int OPEN_ROWS=3;
+    const int HALF_MAX=8;
+
+    vector<int> path1(curMapH),path2(curMapH);
+    int lo=MIN_SIDE+HALF_MAX;
+    int hi=curMapW-MIN_SIDE-HALF_MAX;
+    path1[0]=curMapW/2-6;
+    path2[0]=curMapW/2+6;
+    if(path1[0]<lo)path1[0]=lo;
+    if(path1[0]>hi)path1[0]=hi;
+    if(path2[0]<lo)path2[0]=lo;
+    if(path2[0]>hi)path2[0]=hi;
+
+    for(int y=1;y<curMapH;y++){
+        path1[y]=path1[y-1]+(rand()%3-1);
+        if(path1[y]<lo)path1[y]=lo;
+        if(path1[y]>hi)path1[y]=hi;
+        path2[y]=path2[y-1]+(rand()%3-1);
+        if(path2[y]<lo)path2[y]=lo;
+        if(path2[y]>hi)path2[y]=hi;
+    }
+
+    vector<bool> isOpenRow(curMapH,false);
+    vector<vector<pair<int,int>>> openIntervals(curMapH);
+
+    for(int y=6;y<curMapH-6;y+=ROW_PERIOD){
+        bool pickedRows[ROW_PERIOD]={false};
+        int picked=0,att=0;
+
+        if(y==6){ pickedRows[0]=true; picked=1; }
+
+        while(picked<OPEN_ROWS&&att<300){
+            int r=rand()%ROW_PERIOD;
+            if(r<0||r>=ROW_PERIOD){att++;continue;}
+            if(pickedRows[r]){att++;continue;}
+            int yy=y+r;
+            if(yy<6||yy>=curMapH-6){att++;continue;}
+            pickedRows[r]=true;
+            picked++; att++;
+        }
+
+        for(int r=0;r<ROW_PERIOD;r++){
+            int yy=y+r;
+            if(yy<6||yy>=curMapH-6)continue;
+
+            if(pickedRows[r]){
+                isOpenRow[yy]=true;
+
+                int cx1=path1[yy];
+                int cx2=path2[yy];
+                if(cx1>cx2){int t=cx1;cx1=cx2;cx2=t;}
+                int dist=cx2-cx1;
+
+                if(dist<18){
+                    int mid=(cx1+cx2)/2;
+                    int w=8+rand()%8;
+                    int lx=mid-w/2;
+                    int rx=lx+w-1;
+                    if(lx>cx1-3)lx=cx1-3;
+                    if(rx<cx2+3)rx=cx2+3;
+                    if(rx-lx+1>15){int mid2=(lx+rx)/2;lx=mid2-7;rx=mid2+7;}
+                    if(lx<MIN_SIDE)lx=MIN_SIDE;
+                    if(rx>curMapW-MIN_SIDE-1)rx=curMapW-MIN_SIDE-1;
+                    for(int xx=lx;xx<=rx;xx++)map[yy][xx]=' ';
+                    openIntervals[yy].push_back({lx,rx+1});
+                }else{
+                    int w1=3+rand()%6;
+                    int w2=3+rand()%6;
+                    int lx1=cx1-w1/2;
+                    int rx1=lx1+w1-1;
+                    int lx2=cx2-w2/2;
+                    int rx2=lx2+w2-1;
+                    if(lx1<MIN_SIDE)lx1=MIN_SIDE;
+                    if(rx1>curMapW-MIN_SIDE-1)rx1=curMapW-MIN_SIDE-1;
+                    if(lx2<MIN_SIDE)lx2=MIN_SIDE;
+                    if(rx2>curMapW-MIN_SIDE-1)rx2=curMapW-MIN_SIDE-1;
+                    if(rx1>=lx2){
+                        int mid=(cx1+cx2)/2;
+                        int w=8+rand()%8;
+                        int lx=mid-w/2;
+                        int rx=lx+w-1;
+                        if(lx<MIN_SIDE)lx=MIN_SIDE;
+                        if(rx>curMapW-MIN_SIDE-1)rx=curMapW-MIN_SIDE-1;
+                        for(int xx=lx;xx<=rx;xx++)map[yy][xx]=' ';
+                        openIntervals[yy].push_back({lx,rx+1});
+                    }else{
+                        for(int xx=lx1;xx<=rx1;xx++)map[yy][xx]=' ';
+                        for(int xx=lx2;xx<=rx2;xx++)map[yy][xx]=' ';
+                        openIntervals[yy].push_back({lx1,rx1+1});
+                        openIntervals[yy].push_back({lx2,rx2+1});
+                    }
+                }
+
+                floorGaps.push_back({yy,cx1,cx2});
+            }else{
+                for(int xx=0;xx<curMapW;xx++)map[yy][xx]=' ';
+            }
+        }
+    }
+
+    // 金币：每行都在路径上放（连续曲线）
+    for(int y=6;y<curMapH-6;y++){
+        int cx1=path1[y];
+        int cx2=path2[y];
+        for(int dx=-1;dx<=1;dx++){
+            int nx=cx1+dx;
+            if(nx>=0&&nx<curMapW&&map[y][nx]==' ')map[y][nx]='o';
+            nx=cx2+dx;
+            if(nx>=0&&nx<curMapW&&map[y][nx]==' ')map[y][nx]='o';
+        }
+    }
+
+    // 平台：避开路径上下 2 格 + 避开开口
+    bool onlyBlink=isBlinkMode&&!isMovingPlatformMode;
+    bool onlyMoving=isMovingPlatformMode&&!isBlinkMode;
+
+    for(int y=6;y<curMapH-6;y++){
+        if(isOpenRow[y])continue;
+        if(mpCount>=MAX_MP)break;
+        if(rand()%2!=0)continue;
+
+        int len=3+rand()%4;
+        int x0=1+rand()%(curMapW-len-1);
+
+        bool blocksPath=false;
+        for(int checkY=y-2;checkY<=y+2;checkY++){
+            if(checkY<0||checkY>=curMapH)continue;
+            for(int xx=x0;xx<x0+len;xx++){
+                if(xx==path1[checkY]||xx==path2[checkY]){blocksPath=true;break;}
+            }
+            if(blocksPath)break;
+        }
+        if(blocksPath)continue;
+
+        bool underOpening=false;
+        for(int checkY=y-3;checkY<=y+3;checkY++){
+            if(checkY<0||checkY>=curMapH)continue;
+            for(size_t k=0;k<openIntervals[checkY].size();k++){
+                int a=openIntervals[checkY][k].first;
+                int b=openIntervals[checkY][k].second;
+                if(x0<b&&x0+len>a){underOpening=true;break;}
+            }
+            if(underOpening)break;
+        }
+        if(underOpening)continue;
+
+        bool makeMoving;
+        if(onlyBlink)makeMoving=false;
+        else if(onlyMoving)makeMoving=true;
+        else makeMoving=(rand()%2==0);
+
+        if(makeMoving){
+            int range=3+rand()%4;
+            mps[mpCount++]=makeNormalPlatform(x0,y,len,4,range,(rand()%2==0));
+        }else{
+            mps[mpCount++]=makePhasePlatform(x0,y,len,1,false,false);
+        }
+    }
+
+    // 怪物：避开路径上下 2 格
+    int monsterNum;
+    if(isMonsterMode)monsterNum=isEasyMode?30:50;
+    else monsterNum=isEasyMode?12:24;
+
+    int placedM=0,attM=0;
+    while(placedM<monsterNum&&attM<monsterNum*30&&monsterCount<MAX_MON){
+        int y=8+rand()%(curMapH-20);
+        if(isOpenRow[y]){attM++;continue;}
+        int mx=3+rand()%(curMapW-6);
+        if(map[y][mx]!=' '){attM++;continue;}
+        bool nearPath=false;
+        for(int checkY=y-2;checkY<=y+2;checkY++){
+            if(checkY<0||checkY>=curMapH)continue;
+            if(mx==path1[checkY]||mx==path2[checkY]){nearPath=true;break;}
+        }
+        if(nearPath){attM++;continue;}
+        bool occ=false;
+        for(int j=0;j<monsterCount;j++)
+            if(monsters[j].alive&&monsters[j].x==mx&&monsters[j].y==y){occ=true;break;}
+        if(!occ){addMonster(mx,y,999999,0);placedM++;}
+        attM++;
+    }
+    totalMonsters=monsterCount;
+
+    // 出生点
+    if(!floorGaps.empty()){
+        lastGapX=floorGaps[0].bigCX;
+        lastGapY=1;
+    }else{
+        lastGapX=curMapW/2;
+        lastGapY=1;
+    }
+}
+
+void updatePlayerFalling(int&px,int&py,int&vy,bool&alive,int&respawn,int&coins,int&pScore,int&inv,int&moveTimer,bool isP1){
+    if(!alive){
+        respawn--;
+        if(respawn<=0){
+            alive=true;
+            vy=0;
+            px=lastGapX;
+            py=1;
+            inv=60;
+        }
+        return;
+    }
+    if(inv>0)inv--;
+
+    bool left  = isP1 ? (keyDown('A')||(!is2PMode&&keyDown(VK_LEFT)))  : keyDown(VK_LEFT);
+    bool right = isP1 ? (keyDown('D')||(!is2PMode&&keyDown(VK_RIGHT))) : keyDown(VK_RIGHT);
+
+    moveTimer++;
+    if(moveTimer>=2){
+        moveTimer=0;
+        int dx=0;
+        if(left&&!right)dx=-1;
+        if(right&&!left)dx=1;
+        if(dx!=0){
+            bool hitPlayerX=false;
+            if(is2PMode){
+                if(isP1&&p2Alive&&px+dx==p2X&&py==p2Y)hitPlayerX=true;
+                if(!isP1&&p1Alive&&px+dx==p1X&&py==p1Y)hitPlayerX=true;
+            }
+            if(px+dx>=0&&px+dx<curMapW&&!isSolid(px+dx,py)&&!hitPlayerX)px+=dx;
+        }
+    }
+
+    if(vy==0)vy=1;
+
+    if(gameTicks % 2 != 0){
+        updateLastGap(px,py);
+        tryCollectCoin(px,py,coins,pScore);
+        tryCollectPlatformCoin(px,py,coins,pScore);
+        return;
+    }
+
+    int ny=py+1;
+
+    if(ny>=curMapH-10){
+        py=curMapH-10;
+        win=true;
+        winType=7;
+        return;
+    }
+
+    tryCollectCoin(px,py,coins,pScore);
+    tryCollectPlatformCoin(px,py,coins,pScore);
+
+    bool hitGround=isSolid(px,ny);
+    bool hitPlatform=false;
+    if(!hitGround){
+        for(int i=0;i<mpCount;i++){
+            if(!mps[i].visible)continue;
+            if(ny==mps[i].y&&px>=mps[i].x&&px<mps[i].x+mps[i].len){
+                hitPlatform=true;
+                break;
+            }
+        }
+    }
+
+    if(hitGround||hitPlatform){
+        if(pScore>=200){
+            pScore-=200;
+            if(pScore<0)pScore=0;
+            px=lastGapX;
+            py=1;
+            vy=0;
+            inv=60;
+            return;
+        }else{
+            alive=false;
+            respawn=60;
+            if(!is2PMode)gameOver=true;
+            return;
+        }
+    }else{
+        py=ny;
+        updateLastGap(px,py);
+        tryCollectCoin(px,py,coins,pScore);
+        tryCollectPlatformCoin(px,py,coins,pScore);
+    }
+
+    for(int i=0;i<monsterCount;i++){
+        if(!monsters[i].alive)continue;
+        Monster&m=monsters[i];
+        if(m.x==px&&m.y==py&&vy>0){
+            vy=-8;
+            m.alive=false;
+            monstersKilled++;
+            pScore+=5;
+            addSplat(m.x,m.y);
+        }
+    }
+}
+
+// ==================== TOWER ====================
+void initTowerMap(){
+    curMapW=60;
+    curMapH=400;
+    camX=0;
+    camY=380;
+    for(int y=0;y<curMapH;y++)
+        for(int x=0;x<curMapW;x++)
+            map[y][x]=' ';
+    fillRect('#',0,398,11,399);
+    fillRect('#',24,398,35,399);
+    fillRect('#',48,398,59,399);
+
+    Difficulty D=getDifficulty();
+    int gap=D.towerGap;
+    int ly=394;
+    int lastCX=30;
+    int layerIndex=0;
+    int mpPlaced=0;
+    bool lastWasSolid=false;
+
+    struct Layer{int cx,y,w;char ch;};
+    vector<Layer> layers;
+
+    if(isMovingPlatformMode){
+        while(ly>12&&mpCount<MAX_MP){
+            int len=9+rand()%5;
+            int cx=lastCX+(rand()%7-3);
+            int half=len/2;
+            if(cx-half<1)cx=half+1;
+            if(cx+half>curMapW-2)cx=curMapW-2-half;
+            int mx=cx-half;
+            if(mx<0)mx=0;
+            if(mx+len>curMapW)mx=curMapW-len;
+            int range=4+rand()%5;
+            MovingPlatform mp;
+            if(rand()%3==0){
+                range=2+rand()%2;
+                mp=makeDiagonalPlatform(mx,ly,len,5,range);
+            }else{
+                mp=makeNormalPlatform(mx,ly,len,5,range,true);
+            }
+            mp.coinMask=1<<(rand()%len);
+            mps[mpCount++]=mp;
+            lastCX=mx+len/2;
+            ly-=gap;
+            layerIndex++;
+        }
+        fillRect('#',22,8,38,8);
+        fillRect('#',15,11,45,11);
+        map[7][30]='S';
+        int tm=isMonsterMode?MAX_MON:(D.towerMpMonsterMin+rand()%D.towerMpMonsterRange);
+        int placed=0,att=0;
+        while(placed<tm&&att<tm*20&&monsterCount<MAX_MON){
+            int pi=rand()%mpCount;
+            MovingPlatform&p=mps[pi];
+            int mxx=p.x+rand()%p.len;
+            int myy=p.y-1;
+            if(myy>2&&mxx>=0&&mxx<curMapW&&map[myy][mxx]==' '){
+                bool occ=false;
+                for(int j=0;j<monsterCount;j++)
+                    if(monsters[j].alive&&monsters[j].x==mxx&&monsters[j].y==myy){occ=true;break;}
+                if(!occ){addMonster(mxx,myy,(rand()%2==0)?6:10,rand()%4);placed++;}
+            }
+            att++;
+        }
+        totalMonsters=monsterCount;
+        return;
+    }
+
+    if(isBlinkMode){
+        int blinkGap=isEasyMode?3:4;
+        int blinkLy=394;
+        int blinkLastCenter=30;
+        int blinkLayer=0;
+        while(blinkLy>12&&mpCount+2<=MAX_MP){
+            int len=5+rand()%3;
+            int offset=4+rand()%3;
+            int leftCX=blinkLastCenter-offset;
+            int rightCX=blinkLastCenter+offset;
+            if(leftCX-len/2<1)leftCX=len/2+1;
+            if(rightCX+len/2>curMapW-2)rightCX=curMapW-2-len/2;
+            MovingPlatform leftMp=makePhasePlatform(leftCX-len/2,blinkLy,len,1,true,false);
+            MovingPlatform rightMp=makePhasePlatform(rightCX-len/2,blinkLy,len,1,true,false);
+            bool leftVisibleFirst=(blinkLayer%2==0);
+            leftMp.phaseTick=leftVisibleFirst?0:TICKS_PER_SEC;
+            leftMp.visible=leftVisibleFirst;
+            rightMp.phaseTick=leftVisibleFirst?TICKS_PER_SEC:0;
+            rightMp.visible=!leftVisibleFirst;
+            mps[mpCount++]=leftMp;
+            mps[mpCount++]=rightMp;
+            blinkLastCenter+=(rand()%5-2);
+            if(blinkLastCenter<15)blinkLastCenter=15;
+            if(blinkLastCenter>curMapW-15)blinkLastCenter=curMapW-15;
+            blinkLy-=blinkGap;
+            blinkLayer++;
+        }
+        fillRect('#',22,8,38,8);
+        fillRect('#',15,11,45,11);
+        map[7][30]='S';
+        int tm=isMonsterMode?MAX_MON:(isEasyMode?(8+rand()%5):(10+rand()%8));
+        int placed=0,att=0;
+        while(placed<tm&&att<tm*20&&monsterCount<MAX_MON&&mpCount>0){
+            int pi=rand()%mpCount;
+            MovingPlatform&p=mps[pi];
+            if(p.type!=1){att++;continue;}
+            int mxx=p.x+rand()%p.len;
+            int myy=p.y-1;
+            if(myy>2&&mxx>=0&&mxx<curMapW&&map[myy][mxx]==' '){
+                bool occ=false;
+                for(int j=0;j<monsterCount;j++)
+                    if(monsters[j].alive&&monsters[j].x==mxx&&monsters[j].y==myy){occ=true;break;}
+                if(!occ){addMonster(mxx,myy,(rand()%2==0)?6:10,rand()%4);placed++;}
+            }
+            att++;
+        }
+        totalMonsters=monsterCount;
+        return;
+    }
+
+    while(ly>12){
+        bool useMP=(mpPlaced<16&&layerIndex%7==3);
+        if(useMP){
+            int len=7+rand()%4;
+            int mx=10+rand()%(curMapW-10-len-10);
+            MovingPlatform mp=makeNormalPlatform(mx,ly,len,4,10,true);
+            if(isCoinsMode)mp.coinMask=(1<<len)-1;
+            else mp.coinMask=1<<(rand()%len);
+            mps[mpCount++]=mp;
+            mpPlaced++;
+            lastCX=mx+len/2;
+            lastWasSolid=false;
+        }else{
+            bool solid=(layerIndex>0)&&!lastWasSolid&&(rand()%5==0);
+            int w=solid?(4+rand()%3):(10+rand()%4);
+            int cx=lastCX+(rand()%3-1);
+            int half=w/2;
+            if(cx-half<1)cx=half+1;
+            if(cx+half>curMapW-2)cx=curMapW-2-half;
+            int x1=cx-half;
+            char ch=solid?'#':'=';
+            fillRect(ch,x1,ly,x1+w-1,ly);
+            layers.push_back({cx,ly,w,ch});
+            lastCX=cx;
+            lastWasSolid=solid;
+        }
+        ly-=gap;
+        layerIndex++;
+    }
+    fillRect('=',22,8,38,8);
+    fillRect('=',15,11,45,11);
+    map[7][30]='S';
+    int tl=(int)layers.size();
+    vector<int>idx;
+    for(int i=0;i<tl;i++)idx.push_back(i);
+    for(int i=0;i<tl;i++){int j=rand()%tl;swap(idx[i],idx[j]);}
+
+    int coinLimit=isCoinsMode?99999:60;
+    int coinCount=0;
+    for(int i=0;i<tl&&coinCount<coinLimit;i++){
+        Layer&L=layers[idx[i]];
+        int x1=L.cx-L.w/2;
+        int coinX=x1+rand()%L.w;
+        if(map[L.y-1][coinX]==' '){
+            map[L.y-1][coinX]='o';
+            coinCount++;
+        }
+    }
+    if(coinCount<coinLimit){
+        for(int i=0;i<tl&&coinCount<coinLimit;i++){
+            Layer&L=layers[i];
+            int x1=L.cx-L.w/2;
+            for(int t=0;t<L.w&&coinCount<coinLimit;t++){
+                int coinX=x1+t;
+                if(coinX>=0&&coinX<curMapW&&map[L.y-1][coinX]==' '){
+                    map[L.y-1][coinX]='o';
+                    coinCount++;
+                }
+            }
+        }
+    }
+
+    int tm=isMonsterMode?MAX_MON:12;
+    for(int i=0;i<tl;i++){int j=rand()%tl;swap(idx[i],idx[j]);}
+    int mc=0;
+    for(int i=0;i<tl&&mc<tm;i++){
+        Layer&L=layers[idx[i]];
+        int x1=L.cx-L.w/2;
+        int monX=x1+rand()%L.w;
+        char c=map[L.y-1][monX];
+        if(c==' '||c=='o'){
+            addMonster(monX,L.y-1,(rand()%2==0)?6:10,rand()%4);
+            mc++;
+        }
+    }
+    if(mc<tm){
+        for(int i=0;i<tl&&mc<tm;i++){
+            Layer&L=layers[i];
+            int x1=L.cx-L.w/2;
+            for(int t=0;t<L.w&&mc<tm;t++){
+                int monX=x1+t;
+                if(monX>=0&&monX<curMapW&&map[L.y-1][monX]!='#'&&monsterCount<MAX_MON){
+                    addMonster(monX,L.y-1,(rand()%2==0)?6:10,rand()%4);
+                    mc++;
+                }
+            }
+        }
+    }
+    totalMonsters=monsterCount;
+}
+
+// ==================== INIT MAP ====================
+void initMap(){
+    totalCoins=0;
+    collectedCoins=0;
+    monsterCount=0;
+    totalMonsters=0;
+    monstersKilled=0;
+    splatCount=0;
+    mpCount=0;
+    gameTicks=0;
+    camX=0;
+    camY=0;
+    srand((unsigned)time(0));
+
+    Difficulty D=getDifficulty();
+
+    if(isFallingMode){ initFallingMap(); recountCoins(); return; }
+    if(isTowerMode){ initTowerMap(); recountCoins(); return; }
+
+    curMapW=NORMAL_MAP_W;
+    curMapH=NORMAL_MAP_H;
+    for(int y=0;y<curMapH;y++)
+        for(int x=0;x<curMapW;x++)
+            map[y][x]=' ';
+
+    if(isMovingPlatformMode){
+        fillRect('#',0,GROUND_Y,15,GROUND_Y+1);
+        fillRect('#',curMapW-30,GROUND_Y,curMapW-1,GROUND_Y+1);
+        int px2=22;
+        int lastY=GROUND_Y-3;
+        while(px2<curMapW-40&&mpCount<MAX_MP){
+            int len=6+rand()%3;
+            lastY+=(rand()%5-2);
+            if(lastY>GROUND_Y-2)lastY=GROUND_Y-2;
+            if(lastY<6)lastY=6;
+            int range=5+rand()%6;
+            MovingPlatform mp;
+            if(rand()%3==0){
+                range=2+rand()%2;
+                mp=makeDiagonalPlatform(px2,lastY,len,4+rand()%2,range);
+            }else{
+                mp=makeNormalPlatform(px2,lastY,len,4+rand()%2,range,true);
+            }
+            mp.coinMask=1<<(rand()%len);
+            mps[mpCount++]=mp;
+            px2+=5+rand()%3;
+        }
+    }else if(isBlinkMode){
+        fillRect('#',0,GROUND_Y,15,GROUND_Y+1);
+        fillRect('#',curMapW-25,GROUND_Y,curMapW-1,GROUND_Y+1);
+        int px2=19;
+        int lastY=GROUND_Y-3;
+        while(px2<curMapW-32&&mpCount<MAX_MP){
+            int len=4+rand()%3;
+            lastY+=(rand()%5-2);
+            if(lastY<10)lastY=10;
+            if(lastY>GROUND_Y-2)lastY=GROUND_Y-2;
+            MovingPlatform mp=makePhasePlatform(px2,lastY,len,1,true,false);
+            mp.phaseTick=(mpCount%2)*TICKS_PER_SEC;
+            mp.visible=(mp.phaseTick<TICKS_PER_SEC);
+            mps[mpCount++]=mp;
+            px2+=len+1+rand()%2;
+        }
+    }else if(isIslandMode){
+        fillRect('#',0,GROUND_Y,12,GROUND_Y+1);
+        int currentX=20;
+        int minGap=D.islandGapMin;
+        int maxGap=D.islandGapMax;
+        int currentY=GROUND_Y-2;
+        while(currentX<curMapW-20){
+            int width=6+rand()%4;
+            int depth=rand()%2;
+            for(int i=0;i<width;i++){
+                map[currentY][currentX+i]='#';
+                for(int d=1;d<=depth;d++)
+                    if(currentY+d<curMapH)map[currentY+d][currentX+i]='#';
+            }
+            if(width>=7&&rand()%2==0)fillRect('=',currentX+2,currentY-3,currentX+width-3,currentY-3);
+            currentY+=(rand()%3-1);
+            if(currentY>GROUND_Y-1)currentY=GROUND_Y-1;
+            if(currentY<GROUND_Y-5)currentY=GROUND_Y-5;
+            currentX+=width+minGap+rand()%(maxGap-minGap+1);
+        }
+        fillRect('#',curMapW-30,GROUND_Y,curMapW-1,GROUND_Y+1);
+    }else{
+        for(int x=0;x<curMapW;x++)map[GROUND_Y][x]=map[GROUND_Y+1][x]='#';
+        fillRect('#',0,GROUND_Y,15,GROUND_Y+1);
+        int base=20;
+        while(base<curMapW-40){
+            int type=rand()%5;
+            if(type==0){
+                for(int i=0;i<3;i++)fillRect('#',base+i,GROUND_Y-1-i,base+5-i,GROUND_Y-1-i);
+                for(int i=1;i<=3;i++)fillRect('#',base+5+i,GROUND_Y-4+i,base+8-i,GROUND_Y-4+i);
+                base+=15;
+            }else if(type==1){
+                fillRect('#',base,GROUND_Y-3,base+1,GROUND_Y);
+                base+=10;
+            }else if(type==2){
+                for(int i=0;i<4;i++)fillRect('#',base+i,GROUND_Y-i-1,base+i,GROUND_Y);
+                int pitWidth=isEasyMode?4:5;
+                for(int i=0;i<pitWidth;i++){
+                    map[GROUND_Y][base+4+i]=' ';
+                    map[GROUND_Y+1][base+4+i]=' ';
+                }
+                for(int i=0;i<4;i++)fillRect('#',base+4+pitWidth+i,GROUND_Y-4+i,base+4+pitWidth+i,GROUND_Y);
+                base+=20;
+            }else if(type==3){
+                int pitWidth=12;
+                for(int i=0;i<pitWidth;i++){
+                    map[GROUND_Y][base+i]=' ';
+                    map[GROUND_Y+1][base+i]=' ';
+                }
+                fillRect('=',base+1,GROUND_Y-3,base+4,GROUND_Y-3);
+                fillRect('=',base+6,GROUND_Y-4,base+9,GROUND_Y-4);
+                base+=18;
+            }else{
+                int maxPit=D.pitMax;
+                int pitWidth=3+rand()%(maxPit-3+1);
+                for(int p=0;p<pitWidth;p++)
+                    if(base+p<curMapW){
+                        map[GROUND_Y][base+p]=' ';
+                        map[GROUND_Y+1][base+p]=' ';
+                    }
+                base+=pitWidth+5;
+            }
+        }
+    }
+
+    if(!isMovingPlatformMode&&!isBlinkMode){
+        int targetMPs=15+rand()%10;
+        int placed=0,att=0;
+        while(placed<targetMPs&&att<targetMPs*40&&mpCount<MAX_MP){
+            int mx=30+rand()%(curMapW-60);
+            int my=GROUND_Y-(3+rand()%4);
+            int len=3+rand()%4;
+            bool h=rand()%3!=0;
+            int range=3+rand()%5;
+            att++;
+            bool diag=(rand()%4==0);
+            if(diag)range=2+rand()%2;
+            bool overlap=false;
+            if(diag){
+                for(int yy=my-range;yy<=my+range;yy++){
+                    for(int xx=mx-range;xx<mx+len+range;xx++){
+                        if(xx<0||xx>=curMapW||yy<0||yy>=curMapH||isSolid(xx,yy)){overlap=true;break;}
+                    }
+                    if(overlap)break;
+                }
+            }else if(h){
+                for(int xx=mx-range;xx<mx+len+range;xx++){
+                    if(xx<0||xx>=curMapW){overlap=true;break;}
+                    if(isSolid(xx,my)){overlap=true;break;}
+                }
+            }else{
+                for(int yy=my-range;yy<=my+range;yy++){
+                    if(yy<0||yy>=curMapH){overlap=true;break;}
+                    for(int j=0;j<len;j++)
+                        if(isSolid(mx+j,yy)){overlap=true;break;}
+                    if(overlap)break;
+                }
+            }
+            if(overlap)continue;
+            MovingPlatform mp;
+            if(diag)mp=makeDiagonalPlatform(mx,my,len,4+rand()%3,range);
+            else mp=makeNormalPlatform(mx,my,len,4+rand()%3,range,h);
+            if(isCoinsMode)mp.coinMask=(1<<len)-1;
+            else mp.coinMask=1<<(rand()%len);
+            mps[mpCount++]=mp;
+            placed++;
+        }
+    }
+
+    clearSpawnArea();
+
+    vector<vector<bool>>reachable(NORMAL_MAP_H,vector<bool>(NORMAL_MAP_W,false));
+    queue<pair<int,int>>q;
+    q.push(make_pair(2,2));
+    while(!q.empty()){
+        int cx=q.front().first;
+        int cy=q.front().second;
+        q.pop();
+        if(reachable[cy][cx])continue;
+        reachable[cy][cx]=true;
+        if(cx>0&&!isSolid(cx-1,cy))q.push(make_pair(cx-1,cy));
+        if(cx<curMapW-1&&!isSolid(cx+1,cy))q.push(make_pair(cx+1,cy));
+        if(cy<curMapH-1&&!isSolid(cx,cy+1)&&!isOneWay(cx,cy+1))q.push(make_pair(cx,cy+1));
+        if(cy<curMapH-1&&(isSolid(cx,cy+1)||isOneWay(cx,cy+1))){
+            for(int jy=1;jy<=8;jy++){
+                if(cy-jy>=0&&!isSolid(cx,cy-jy)){
+                    q.push(make_pair(cx,cy-jy));
+                    int hor=(jy<4)?jy:4;
+                    for(int dx=1;dx<=hor;dx++){
+                        if(cx-dx>=0&&!isSolid(cx-dx,cy-jy))q.push(make_pair(cx-dx,cy-jy));
+                        if(cx+dx<curMapW&&!isSolid(cx+dx,cy-jy))q.push(make_pair(cx+dx,cy-jy));
+                    }
+                }else break;
+            }
+        }
+    }
+
+    vector<pair<int,int>>spots;
+    for(int x=12;x<curMapW-12;x++){
+        for(int y=2;y<GROUND_Y;y++){
+            if(reachable[y][x]&&map[y][x]==' '){
+                if(y-1>=0&&y-2>=0&&map[y-1][x]==' '&&map[y-2][x]==' '){
+                    bool ground=false;
+                    for(int dy=1;dy<=5;dy++){
+                        if(y+dy<curMapH&&(isSolid(x,y+dy)||isOneWay(x,y+dy))){ground=true;break;}
+                    }
+                    if(ground)spots.push_back(make_pair(x,y));
+                }
+            }
+        }
+    }
+    if(!spots.empty()){
+        for(int i=0;i<(int)spots.size();i++){
+            int j=rand()%spots.size();
+            swap(spots[i],spots[j]);
+        }
+    }
+
+    {
+        int phaseCount=8+rand()%5;
+        int placed=0,att=0;
+        while(placed<phaseCount&&att<phaseCount*30&&mpCount<MAX_MP&&!spots.empty()&&!isBlinkMode){
+            int idx2=rand()%spots.size();
+            int sx=spots[idx2].first;
+            int sy=spots[idx2].second;
+            int py=sy-2-rand()%2;
+            if(py<11||py>GROUND_Y-2){att++;continue;}
+            int len=3+rand()%3;
+            int mx=sx-len/2;
+            if(mx<1)mx=1;
+            if(mx+len>curMapW-1)mx=curMapW-1-len;
+            bool overlap=false;
+            for(int j=0;j<len;j++)
+                if(isSolid(mx+j,py)){overlap=true;break;}
+            if(!overlap){
+                for(int j=0;j<mpCount;j++){
+                    if(mps[j].y==py&&mps[j].x<mx+len&&mps[j].x+mps[j].len>mx){overlap=true;break;}
+                }
+            }
+            if(overlap){att++;continue;}
+            int t=(rand()%2==0)?1:2;
+            MovingPlatform mp=makePhasePlatform(mx,py,len,t);
+            mps[mpCount++]=mp;
+            placed++; att++;
+        }
+    }
+
+    if(!isBlinkMode){
+        for(int i=0;i<mpCount&&monsterCount<MAX_MON;i++){
+            if(mps[i].type!=1&&mps[i].type!=2)continue;
+            if(rand()%2!=0)continue;
+            int mxx=mps[i].x+rand()%mps[i].len;
+            int myy=mps[i].y-1;
+            if(myy>2&&mxx>=0&&mxx<curMapW&&map[myy][mxx]==' '){
+                bool occ=false;
+                for(int j=0;j<monsterCount;j++)
+                    if(monsters[j].alive&&monsters[j].x==mxx&&monsters[j].y==myy){occ=true;break;}
+                if(!occ)addMonster(mxx,myy,(rand()%2==0)?6:10,rand()%4);
+            }
+        }
+    }
+    totalMonsters=monsterCount;
+
+    int platCoinCount=0;
+    for(int i=0;i<mpCount;i++)
+        if(mps[i].hasCoin)platCoinCount++;
+
+    int coinLimit;
+    if(isCoinsMode)coinLimit=99999;
+    else coinLimit=105-platCoinCount;
+    if(coinLimit<0)coinLimit=0;
+
+    int coinCount=0;
+    for(int i=0;i<(int)spots.size()&&i<coinLimit;i++){
+        map[spots[i].second][spots[i].first]='o';
+        coinCount++;
+    }
+    if(!isCoinsMode){
+        int att=0;
+        while(coinCount<coinLimit&&att<3000){
+            int rx=20+rand()%(curMapW-40);
+            int ry=2+rand()%(GROUND_Y-2);
+            if(map[ry][rx]==' '&&reachable[ry][rx]){map[ry][rx]='o';coinCount++;}
+            att++;
+        }
+    }
+
+    if(isMovingPlatformMode||isBlinkMode){
+        int tm;
+        if(isBlinkMode)tm=isMonsterMode?MAX_MON:(D.blinkMonsterMin+rand()%D.blinkMonsterRange);
+        else tm=isMonsterMode?MAX_MON:(D.normalMonsterMin+rand()%D.normalMonsterRange);
+        int placed=0,att=0;
+        while(placed<tm&&att<tm*20&&monsterCount<MAX_MON){
+            if(mpCount==0)break;
+            int pi=rand()%mpCount;
+            MovingPlatform&p=mps[pi];
+            int mxx=p.x+rand()%p.len;
+            int myy=p.y-1;
+            if(myy>2&&mxx>=0&&mxx<curMapW&&map[myy][mxx]==' '){
+                bool occ=false;
+                for(int j=0;j<monsterCount;j++)
+                    if(monsters[j].alive&&monsters[j].x==mxx&&monsters[j].y==myy){occ=true;break;}
+                if(!occ){addMonster(mxx,myy,(rand()%2==0)?6:10,rand()%4);placed++;}
+            }
+            att++;
+        }
+        totalMonsters=monsterCount;
+        recountCoins();
+        return;
+    }
+
+    int tm=isMonsterMode?MAX_MON:(D.normalMonsterMin+rand()%D.normalMonsterRange);
+    int att=0;
+    while(monsterCount<tm&&att<tm*30){
+        int mx=20+rand()%(curMapW-40);
+        int my=-1;
+        if(rand()%2==0){
+            my=GROUND_Y-1;
+            while(my>2&&!hasGround(mx,my))my--;
+        }else{
+            my=2+rand()%(GROUND_Y-3);
+            while(my<GROUND_Y-1&&!hasGround(mx,my))my++;
+        }
+        if(my>2&&my<GROUND_Y&&map[my][mx]==' '&&hasGround(mx,my))
+            addMonster(mx,my,(rand()%2==0)?6:10,rand()%4);
+        att++;
+    }
+    totalMonsters=monsterCount;
+    recountCoins();
+}
+
+// ==================== UPDATE ====================
+void updateMovingPlatforms(){
+    for(int i=0;i<mpCount;i++){
+        MovingPlatform&mp=mps[i];
+        int oldX=mp.x,oldY=mp.y;
+
+        if(mp.type==1){
+            mp.phaseTick=(mp.phaseTick+1)%(TICKS_PER_SEC*2);
+            mp.visible=mp.phaseTick<TICKS_PER_SEC;
+        }else if(mp.type==2){
+            if(!mp.visible){
+                mp.hiddenTimer--;
+                if(mp.hiddenTimer<=0){
+                    mp.visible=true;
+                    mp.life=mp.maxLife;
+                    mp.phaseTick=0;
+                }
+            }else{
+                mp.phaseTick++;
+                if(mp.phaseTick>=TICKS_PER_SEC){
+                    mp.phaseTick=0;
+                    bool onIt=false;
+                    if(p1Alive&&p1OnGround&&p1Y==mp.y-1&&p1X>=mp.x&&p1X<mp.x+mp.len)onIt=true;
+                    if(is2PMode&&p2Alive&&p2OnGround&&p2Y==mp.y-1&&p2X>=mp.x&&p2X<mp.x+mp.len)onIt=true;
+                    if(onIt){
+                        mp.life--;
+                        if(mp.life<=0){
+                            mp.visible=false;
+                            mp.hiddenTimer=HIDE_TICKS;
+                            for(int j=0;j<monsterCount;j++){
+                                if(monsters[j].alive&&monsters[j].y==mp.y-1&&monsters[j].x>=mp.x&&monsters[j].x<mp.x+mp.len){
+                                    monsters[j].falling=true;
+                                    monsters[j].vy=1;
+                                    monsters[j].moveTimer=0;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if(mp.type!=0)continue;
+
+        mp.moveTimer++;
+        if(mp.moveTimer>=mp.speed){
+            mp.moveTimer=0;
+            if(mp.diagonal){
+                int nx=mp.x+mp.vx;
+                int ny=mp.y+mp.vy;
+                bool inRX=(nx>=mp.startX-mp.range)&&(nx<=mp.startX+mp.range);
+                bool inRY=(ny>=mp.startY-mp.range)&&(ny<=mp.startY+mp.range);
+                bool diagSafe=true;
+                for(int j=0;j<mp.len;j++)if(isSolid(nx+j,ny)){diagSafe=false;break;}
+                bool xSafe=true;
+                for(int j=0;j<mp.len;j++)if(isSolid(nx+j,mp.y)){xSafe=false;break;}
+                bool ySafe=true;
+                for(int j=0;j<mp.len;j++)if(isSolid(mp.x+j,ny)){ySafe=false;break;}
+                if(diagSafe&&inRX&&inRY){mp.x=nx;mp.y=ny;}
+                else{
+                    if(!inRX)mp.vx=-mp.vx;
+                    if(!inRY)mp.vy=-mp.vy;
+                    if(xSafe&&inRX&&!ySafe){mp.x=nx;mp.vy=-mp.vy;}
+                    else if(ySafe&&inRY&&!xSafe){mp.y=ny;mp.vx=-mp.vx;}
+                    else if(!xSafe&&!ySafe){mp.vx=-mp.vx;mp.vy=-mp.vy;}
+                    else if(!diagSafe&&xSafe&&ySafe){mp.vx=-mp.vx;mp.vy=-mp.vy;}
+                }
+                if(mp.x<=mp.startX-mp.range){mp.vx=1;mp.x+=1;}
+                else if(mp.x>=mp.startX+mp.range){mp.vx=-1;mp.x-=1;}
+                if(mp.y<=mp.startY-mp.range){mp.vy=1;mp.y+=1;}
+                else if(mp.y>=mp.startY+mp.range){mp.vy=-1;mp.y-=1;}
+            }else if(mp.horizontal){
+                int nx=mp.x+mp.dir;
+                bool hitWall=false;
+                for(int j=0;j<mp.len;j++)if(isSolid(nx+j,mp.y)){hitWall=true;break;}
+                if(hitWall)mp.dir*=-1;
+                else mp.x=nx;
+                if(mp.x<=mp.startX-mp.range){mp.dir=1;mp.x+=1;}
+                else if(mp.x>=mp.startX+mp.range){mp.dir=-1;mp.x-=1;}
+            }else{
+                mp.y+=mp.dir;
+                if(mp.dir<0){
+                    bool ceiling=false;
+                    for(int j=0;j<mp.len;j++)if(isSolid(mp.x+j,mp.y)){ceiling=true;break;}
+                    if(ceiling){mp.dir=1;mp.y+=1;}
+                }
+                if(mp.y<=mp.startY-mp.range){mp.dir=1;mp.y+=1;}
+                else if(mp.y>=mp.startY+mp.range){mp.dir=-1;mp.y-=1;}
+            }
+        }
+
+        if(isFallingMode)continue;
+
+        int dx=mp.x-oldX;
+        int dy=mp.y-oldY;
+        if(p1Y==oldY-1&&p1X>=oldX&&p1X<oldX+mp.len){
+            int nx=p1X+dx,ny=p1Y+dy;
+            if(nx>=0&&nx<curMapW&&!isSolid(nx,p1Y))p1X=nx;
+            if(ny>=0&&ny<curMapH&&!isSolid(p1X,ny))p1Y=ny;
+        }
+        if(is2PMode&&p2Y==oldY-1&&p2X>=oldX&&p2X<oldX+mp.len){
+            int nx=p2X+dx,ny=p2Y+dy;
+            if(nx>=0&&nx<curMapW&&!isSolid(nx,p2Y))p2X=nx;
+            if(ny>=0&&ny<curMapH&&!isSolid(p2X,ny))p2Y=ny;
+        }
+        for(int j=0;j<monsterCount;j++){
+            if(!monsters[j].alive)continue;
+            if(monsters[j].falling)continue;
+            if(monsters[j].y==oldY-1&&monsters[j].x>=oldX&&monsters[j].x<oldX+mp.len){
+                int nx=monsters[j].x+dx,ny=monsters[j].y+dy;
+                if(nx>=0&&nx<curMapW)monsters[j].x=nx;
+                if(ny>=0&&ny<curMapH)monsters[j].y=ny;
+            }
+        }
+    }
+}
+
+void updateMonsters(){
+    if(isFallingMode)return;
+    for(int i=0;i<monsterCount;i++){
+        if(!monsters[i].alive)continue;
+        Monster&m=monsters[i];
+        if(m.falling){
+            m.moveTimer++;
+            if(m.moveTimer%2==0){
+                int ny=m.y+m.vy;
+                bool ground=false;
+                if(isSolid(m.x,ny)||isOneWay(m.x,ny))ground=true;
+                for(int j=0;j<mpCount;j++){
+                    if(!mps[j].visible)continue;
+                    if(ny==mps[j].y&&m.x>=mps[j].x&&m.x<mps[j].x+mps[j].len){ground=true;break;}
+                }
+                if(ground){m.falling=false;m.vy=0;m.moveTimer=0;}
+                else{
+                    m.y=ny;
+                    if(m.y>=curMapH-1)m.alive=false;
+                }
+            }
+            continue;
+        }
+        m.moveTimer++;
+        if(m.moveTimer<m.speed)continue;
+        m.moveTimer=0;
+        if(isMovingPlatformMode||isBlinkMode){
+            int pi=-1;
+            for(int j=0;j<mpCount;j++){
+                if(!mps[j].visible)continue;
+                if(m.y==mps[j].y-1&&m.x>=mps[j].x&&m.x<mps[j].x+mps[j].len){pi=j;break;}
+            }
+            if(pi<0)continue;
+            MovingPlatform&p=mps[pi];
+            int nx=m.x+m.dir;
+            if(nx<p.x||nx>=p.x+p.len)m.dir=-m.dir;
+            else m.x=nx;
+            continue;
+        }
+        if(isMoonMode){
+            m.dir=(p1X>m.x)?1:-1;
+            int nx=m.x+m.dir;
+            if(nx>=0&&nx<curMapW&&!isSolid(nx,m.y))m.x=nx;
+        }else{
+            int dist=0;
+            if(is2PMode){
+                int d1=abs(p1X-m.x)+abs(p1Y-m.y);
+                int d2=abs(p2X-m.x)+abs(p2Y-m.y);
+                if(d1<d2)dist=p1X-m.x;
+                else dist=p2X-m.x;
+            }else dist=p1X-m.x;
+
+            auto groundAt=[&](int gx,int gy)->bool{
+                if(hasGround(gx,gy))return true;
+                for(int k=0;k<mpCount;k++){
+                    if(mps[k].type==2&&mps[k].visible&&
+                       gy+1==mps[k].y&&gx>=mps[k].x&&gx<mps[k].x+mps[k].len)
+                        return true;
+                }
+                return false;
+            };
+
+            if(groundAt(m.x,m.y)&&abs(dist)<=8&&dist!=0)m.dir=(dist>0)?1:-1;
+            int nx=m.x+m.dir;
+            if(!groundAt(nx,m.y)||isSolid(nx,m.y)){
+                m.dir=-m.dir;
+                nx=m.x+m.dir;
+                if(!groundAt(nx,m.y)||isSolid(nx,m.y))continue;
+            }
+            m.x=nx;
+        }
+    }
+}
+
+void updateSplats(){
+    for(int i=0;i<splatCount;i++){
+        splats[i].timer--;
+        if(splats[i].timer<=0){
+            for(int j=i;j<splatCount-1;j++)splats[j]=splats[j+1];
+            splatCount--;
+            i--;
+        }
+    }
+}
+
+void updatePlayer(int&px,int&py,int&vy,bool&onGround,bool&alive,int&respawn,int&coins,int&pScore,int&inv,bool&canDoubleJump,int&moveTimer,bool isP1){
+    if(!alive){
+        respawn--;
+        if(respawn<=0){
+            alive=true;
+            vy=0;
+            if(isTowerMode)findSafeSpot(px,py,curMapW/2);
+            else{px=isP1?2:6;py=2;}
+            if(isP1)p1Coyote=0;
+            else p2Coyote=0;
+        }
+        return;
+    }
+    if(inv>0)inv--;
+    int&coyote=isP1?p1Coyote:p2Coyote;
+    bool left=isP1?(keyDown('A')||(!is2PMode&&keyDown(VK_LEFT))):keyDown(VK_LEFT);
+    bool right=isP1?(keyDown('D')||(!is2PMode&&keyDown(VK_RIGHT))):keyDown(VK_RIGHT);
+    bool jump=isP1?(keyDown('W')||keyDown(VK_SPACE)||(!is2PMode&&keyDown(VK_UP))):keyDown(VK_UP);
+
+    moveTimer++;
+    int moveThreshold=isSpeedMode?1:2;
+    if(moveTimer>=moveThreshold){
+        moveTimer=0;
+        int dx=0;
+        if(left&&!right)dx=-1;
+        if(right&&!left)dx=1;
+        if(dx!=0){
+            bool hitPlayerX=false;
+            if(is2PMode){
+                if(isP1&&p2Alive&&px+dx==p2X&&py==p2Y)hitPlayerX=true;
+                if(!isP1&&p1Alive&&px+dx==p1X&&py==p1Y)hitPlayerX=true;
+            }
+            if(!isSolid(px+dx,py)&&!hitPlayerX){
+                bool carrying=false;
+                if(is2PMode){
+                    if(isP1&&p2Alive&&p2X==px&&p2Y==py-1)carrying=true;
+                    if(!isP1&&p1Alive&&p1X==px&&p1Y==py-1)carrying=true;
+                }
+                if(!carrying||(carrying&&!isSolid((isP1?p2X:p1X)+dx,(isP1?p2Y:p1Y)))){
+                    px+=dx;
+                    if(carrying){if(isP1)p2X+=dx;else p1X+=dx;}
+                    tryCollectCoin(px,py,coins,pScore);
+                    if(carrying){
+                        if(isP1)tryCollectCoin(p2X,p2Y,p2Coins,p2Score);
+                        else tryCollectCoin(p1X,p1Y,p1Coins,p1Score);
+                    }
+                }
+            }
+        }
+    }
+
+    bool carrying=false;
+    bool onTeammate=false;
+    if(is2PMode){
+        if(isP1){
+            if(p2Alive&&p2X==px&&p2Y==py-1)carrying=true;
+            if(p2Alive&&px==p2X&&py+1==p2Y)onTeammate=true;
+        }else{
+            if(p1Alive&&p1X==px&&p1Y==py-1)carrying=true;
+            if(p1Alive&&px==p1X&&py+1==p1Y)onTeammate=true;
+        }
+    }
+
+    bool onMovingPlatform=false;
+    for(int i=0;i<mpCount;i++){
+        if(!mps[i].visible)continue;
+        if(py==mps[i].y-1&&px>=mps[i].x&&px<mps[i].x+mps[i].len){onMovingPlatform=true;break;}
+    }
+
+    if(onGround&&!isSolid(px,py+1)&&!isOneWay(px,py+1)&&!onTeammate&&!onMovingPlatform){
+        onGround=false;
+        vy=1;
+    }
+    if(onGround||onMovingPlatform)coyote=0;
+    else if(coyote<10)coyote++;
+
+    bool&jumpPrev=isP1?p1JumpPrev:p2JumpPrev;
+    if(jump&&!jumpPrev){
+        if(onGround||onMovingPlatform||coyote<=5){
+            if(carrying){
+                vy=isSpeedMode?-8:(isMoonMode?-6:-5);
+                if(isP1){p2Vy=vy;p2OnGround=false;p2CanDoubleJump=true;p2Coyote=10;}
+                else{p1Vy=vy;p1OnGround=false;p1CanDoubleJump=true;p1Coyote=10;}
+            }else{
+                vy=isSpeedMode?-8:(isMoonMode?-6:-5);
+            }
+            onGround=false;
+            coyote=10;
+        }else if(canDoubleJump){
+            vy=isSpeedMode?-8:(isMoonMode?-6:-5);
+            canDoubleJump=false;
+            if(is2PMode){
+                if(isP1&&onTeammate)p2Vy=8;
+                else if(!isP1&&onTeammate)p1Vy=8;
+            }
+        }
+    }
+    jumpPrev=jump;
+
+    if(!onGround){
+        if(vy==0)vy=1;
+        int step=(vy>0)?1:-1;
+        bool doMove=(step<0)||((gameTicks+(isP1?0:1))%2==0);
+        if(doMove){
+            int ny=py+step;
+            if(ny<=0){py=0;vy=0;canDoubleJump=false;}
+            else if(step<0){
+                if(isSolid(px,ny))vy=0;
+                else py=ny;
+            }else{
+                bool hitPlayer=false;
+                if(is2PMode){
+                    if(isP1&&p2Alive&&px==p2X&&ny==p2Y)hitPlayer=true;
+                    if(!isP1&&p1Alive&&px==p1X&&ny==p1Y)hitPlayer=true;
+                }
+                bool hitMP=false;
+                for(int i=0;i<mpCount;i++){
+                    if(!mps[i].visible)continue;
+                    if(ny==mps[i].y&&px>=mps[i].x&&px<mps[i].x+mps[i].len){hitMP=true;break;}
+                }
+                if(isSolid(px,ny)||isOneWay(px,ny)||hitPlayer||hitMP){
+                    onGround=true;vy=0;canDoubleJump=false;
+                }else py=ny;
+            }
+        }
+        if(!onGround){
+            if(isMoonMode){if(gameTicks%2==0)vy+=1;}
+            else{if(carrying)vy+=2;else vy+=1;}
+        }
+    }
+
+    if(isTowerMode){
+        if(py>camY+H-1){
+            if(gameTicks>10){
+                if(pScore>=200){
+                    pScore-=200;
+                    int nx=px,ny=camY+H-2;
+                    findSafeSpot(nx,ny,px);
+                    px=nx;py=ny;vy=0;inv=60;
+                    return;
+                }
+                alive=false;
+                respawn=60;
+                if(!is2PMode)gameOver=true;
+            }
+        }
+    }else{
+        if(py>=curMapH-1&&!isSolid(px,py+1)&&!isOneWay(px,py+1)){
+            if(gameTicks>10){
+                if(!is2PMode&&pScore>=200){
+                    pScore-=200;
+                    px=max(2,px-5);py=2;vy=0;inv=60;
+                    return;
+                }
+                alive=false;
+                respawn=60;
+                if(!is2PMode)gameOver=true;
+            }
+        }
+    }
+
+    tryCollectCoin(px,py,coins,pScore);
+    tryCollectPlatformCoin(px,py,coins,pScore);
+    if(carrying){
+        if(isP1)tryCollectPlatformCoin(p2X,p2Y,p2Coins,p2Score);
+        else tryCollectPlatformCoin(p1X,p1Y,p1Coins,p1Score);
+    }
+
+    for(int i=0;i<monsterCount;i++){
+        if(!monsters[i].alive)continue;
+        Monster&m=monsters[i];
+        if(m.falling)continue;
+        if(isOnHiddenPhase(m.x,m.y))continue;
+        if(m.x==px&&m.y==py&&gameTicks>10&&inv==0){
+            if(pScore>=100){pScore-=100;inv=60;vy=-6;onGround=false;}
+            else{
+                alive=false;
+                respawn=60;
+                if(!is2PMode)gameOver=true;
+                return;
+            }
+        }
+        if(vy>0){
+            bool isStomp=false;
+            if(py==m.y-1||(isMoonMode&&abs(py-m.y)<=1)){
+                if(!isEasyMode){if(px==m.x)isStomp=true;}
+                else{if(abs(px-m.x)<=1)isStomp=true;}
+            }
+            if(isStomp){
+                m.alive=false;
+                monstersKilled++;
+                pScore+=(15+rand()%6);
+                addSplat(m.x,m.y);
+                vy=-7;
+                if(isSpeedMode)timeLeft+=(isTowerMode?125:100);
+            }
+        }
+    }
+}
+
+void resetGame(){
+    initMap();
+    if(isSpeedMode){
+        if(isTowerMode)timeLeft=90*25;
+        else if(isFallingMode)timeLeft=(isEasyMode?25:20)*25;
+        else timeLeft=60*25;
+    }else timeLeft=0;
+
+    if(isFallingMode){
+        p1X=lastGapX;
+        p1Y=1;
+        p2X=lastGapX+2;
+        p2Y=1;
+        p1OnGround=false;
+        p2OnGround=false;
+    }else if(isTowerMode){
+        p1X=30;p1Y=397;
+        p2X=32;p2Y=397;
+    }else{
+        p1X=2;p1Y=2;
+        p2X=6;p2Y=2;
+    }
+    p1Vy=0;p1OnGround=false;p1Alive=true;p1RespawnTimer=0;
+    p1Coins=0;p1Coyote=0;p1Score=0;p1Inv=0;
+    p1CanDoubleJump=false;p1MoveTimer=0;
+    p2Vy=0;p2OnGround=false;p2Alive=true;p2RespawnTimer=0;
+    p2Coins=0;p2Coyote=0;p2Score=0;p2Inv=0;
+    p2CanDoubleJump=false;p2MoveTimer=0;
+    p1JumpPrev=false;p2JumpPrev=false;
+    camX=0;
+    if(isFallingMode)camY=0;
+    else if(isTowerMode)camY=curMapH-H;
+    else camY=0;
+    score=0;
+    gameOver=false;
+    win=false;
+    winType=0;
+    isSleeping=false;
+    pKeyPrev=false;
+
+    if(isFallingMode)playBGM("falling.wav");
+    else if(isBlinkMode)playBGM("blink.wav");
+    else if(isMovingPlatformMode)playBGM("moving.wav");
+    else if(isTowerMode)playBGM("tower.wav");
+    else if(isSpeedMode)playBGM("speed.wav");
+    else if(isDarkMode)playBGM("dark.wav");
+    else if(isMonsterMode)playBGM("monster.wav");
+    else if(isCoinsMode)playBGM("coins.wav");
+    else playBGM("game.wav");
+}
+
+void update(){
+    bool pDown=keyDown('P');
+    if(!isSleeping){
+        if(pDown&&!pKeyPrev&&!gameOver&&!win){
+            isSleeping=true;
+            pKeyPrev=pDown;
+            return;
+        }
+    }else{
+        if(keyDown('Q'))exit(0);
+        if(keyDown('C')){
+            isSleeping=false;
+            pKeyPrev=false;
+            return;
+        }
+        pKeyPrev=pDown;
+        return;
+    }
+    pKeyPrev=pDown;
+
+    if(keyDown('M')){
+        menuState=0;
+        gameStarted=false;
+        gameOver=false;
+        win=false;
+        isSleeping=false;
+        return;
+    }
+    if(gameOver||win){
+        if(keyDown(VK_SPACE))resetGame();
+        if(keyDown('M')){
+            menuState=0;
+            gameStarted=false;
+            gameOver=false;
+            win=false;
+            return;
+        }
+        if(keyDown('Q'))exit(0);
+        return;
+    }
+
+    gameTicks++;
+    if(isSpeedMode){
+        timeLeft--;
+        if(timeLeft<=0){
+            if(isTowerMode||isFallingMode){gameOver=true;return;}
+            if(is2PMode){
+                win=true;
+                if(p1Score>p2Score)winType=3;
+                else if(p2Score>p1Score)winType=4;
+                else winType=5;
+                return;
+            }else{gameOver=true;return;}
+        }
+    }
+    if(!is2PMode)score=p1Score;
+
+    if(isFallingMode){
+        updatePlayerFalling(p1X,p1Y,p1Vy,p1Alive,p1RespawnTimer,p1Coins,p1Score,p1Inv,p1MoveTimer,true);
+        if(is2PMode)updatePlayerFalling(p2X,p2Y,p2Vy,p2Alive,p2RespawnTimer,p2Coins,p2Score,p2Inv,p2MoveTimer,false);
+        updateMovingPlatforms();
+        updateSplats();
+        if(is2PMode&&!p1Alive&&!p2Alive){gameOver=true;return;}
+        int focusY=p1Y;
+        if(is2PMode){
+            if(!p1Alive)focusY=p2Y;
+            else if(!p2Alive)focusY=p1Y;
+            else focusY=(p1Y+p2Y)/2;
+        }
+        if(focusY-camY>H*2/3)camY=focusY-H*2/3;
+        if(focusY-camY<H/3)camY=focusY-H/3;
+        if(camY<0)camY=0;
+        if(camY>curMapH-H)camY=curMapH-H;
+        camX=0;
+        return;
+    }
+
+    updateMovingPlatforms();
+    updatePlayer(p1X,p1Y,p1Vy,p1OnGround,p1Alive,p1RespawnTimer,p1Coins,p1Score,p1Inv,p1CanDoubleJump,p1MoveTimer,true);
+    if(is2PMode)
+        updatePlayer(p2X,p2Y,p2Vy,p2OnGround,p2Alive,p2RespawnTimer,p2Coins,p2Score,p2Inv,p2CanDoubleJump,p2MoveTimer,false);
+    updateMonsters();
+    updateSplats();
+
+    if(isTowerMode){
+        if(!is2PMode){
+            if(p1Alive&&map[p1Y][p1X]=='S'){
+                map[p1Y][p1X]=' ';
+                win=true;
+                if(isSpeedMode)winType=6;
+                else if(collectedCoins>=totalCoins&&monstersKilled==totalMonsters)winType=2;
+                else if(collectedCoins>=totalCoins)winType=1;
+                else winType=0;
+                return;
+            }
+        }else{
+            if(p1Alive&&map[p1Y][p1X]=='S'){map[p1Y][p1X]=' ';win=true;winType=3;return;}
+            if(p2Alive&&map[p2Y][p2X]=='S'){map[p2Y][p2X]=' ';win=true;winType=4;return;}
+            if(!p1Alive&&!p2Alive){gameOver=true;return;}
+        }
+    }else if(is2PMode){
+        if(p1Score>=700&&p1X>=curMapW-5){win=true;winType=3;return;}
+        if(p2Score>=700&&p2X>=curMapW-5){win=true;winType=4;return;}
+        if(!p1Alive&&!p2Alive){gameOver=true;return;}
+    }
+
+    if(isTowerMode){
+        int focusY=p1Y;
+        if(is2PMode){
+            if(!p1Alive)focusY=p2Y;
+            else if(!p2Alive)focusY=p1Y;
+            else focusY=(p1Coins<=p2Coins)?p1Y:p2Y;
+        }
+        int targetCamY=focusY-H/2;
+        if(targetCamY<camY)camY=targetCamY;
+        if(camY<0)camY=0;
+        if(camY>curMapH-H)camY=curMapH-H;
+        camX=0;
+    }else if(is2PMode){
+        int targetX;
+        bool darkFar=abs(p1X-p2X)>W-2;
+        if(isDarkMode){
+            int aliveCount=0,sumX=0;
+            if(p1Alive){sumX+=p1X;aliveCount++;}
+            if(p2Alive){sumX+=p2X;aliveCount++;}
+            targetX=(aliveCount>0)?(sumX/aliveCount):0;
+            if(darkFar)targetX=(p1Coins<=p2Coins)?p1X:p2X;
+        }else{
+            targetX=(p1Coins<=p2Coins)?p1X:p2X;
+        }
+        if(isDarkMode&&!darkFar)camX=targetX-W/2;
+        else{
+            if(targetX-camX>W*2/3)camX=targetX-W*2/3;
+            if(targetX-camX<W/3)camX=targetX-W/3;
+        }
+        if(camX<0)camX=0;
+        if(camX>curMapW-W)camX=curMapW-W;
+        int leftEdge=camX+1,rightEdge=camX+W-2;
+        if(p1X<leftEdge&&(isSolid(leftEdge,p1Y+1)||isOneWay(leftEdge,p1Y+1)))p1X=leftEdge;
+        if(p1X>rightEdge&&(isSolid(rightEdge,p1Y+1)||isOneWay(rightEdge,p1Y+1)))p1X=rightEdge;
+        if(p2X<leftEdge&&(isSolid(leftEdge,p2Y+1)||isOneWay(leftEdge,p2Y+1)))p2X=leftEdge;
+        if(p2X>rightEdge&&(isSolid(rightEdge,p2Y+1)||isOneWay(rightEdge,p2Y+1)))p2X=rightEdge;
+    }else{
+        if(p1X-camX>W*2/3)camX=p1X-W*2/3;
+        if(p1X-camX<W/3)camX=p1X-W/3;
+        if(camX<0)camX=0;
+        if(camX>curMapW-W)camX=curMapW-W;
+        if(p1X>=curMapW-5){
+            if(isSpeedMode){win=true;winType=6;}
+            else if(isCoinsMode){
+                win=true;
+                if(collectedCoins>=totalCoins)winType=2;
+                else if(collectedCoins>=totalCoins/2)winType=1;
+                else winType=0;
+            }else if(isBlinkMode){
+                win=true;
+                if(collectedCoins>=totalCoins)winType=1;
+                else winType=0;
+            }else{
+                if(score>=800){win=true;winType=0;}
+                if(collectedCoins>=totalCoins){win=true;winType=1;}
+                if(collectedCoins>=totalCoins&&monstersKilled==totalMonsters){win=true;winType=2;}
+            }
+        }
+    }
+}
+
+// ==================== DRAW ====================
+void drawMenu(){
+    string s="\033[H\033[J";
+    s+="\n\n";
+    s+="              ==============================\n";
+    s+="                       SUPER MARIO\n";
+    s+="              ==============================\n\n";
+    if(menuState==0){
+        s+="                    [ SELECT MODE ]\n\n";
+        s+="                    1. Normal\n";
+        s+="                    2. Island\n";
+        s+="                    3. Tower\n";
+        s+="                    4. Falling\n\n\n";
+        s+="                       Q to Quit\n";
+    }else if(menuState==1){
+        s+="                    [ SELECT MODIFIER ]\n\n";
+        if(selectedTerrain==0)s+="                     (Normal)\n\n";
+        else if(selectedTerrain==1)s+="                     (Island)\n\n";
+        else if(selectedTerrain==2)s+="                     (Tower)\n\n";
+        else s+="                     (Falling)\n\n";
+        s+="                    1. None\n";
+        s+="                    2. Speed Rush\n";
+        s+="                    3. Moon Gravity\n";
+        s+="                    4. Dark Mode\n";
+        s+="                    5. Monster Mode\n";
+        s+="                    6. Coins Mode\n";
+        s+="                    7. Moving Platform\n";
+        s+="                    8. Blink Platform\n\n";
+        s+="                       M to Back\n";
+    }else if(menuState==2){
+        string terrName=(selectedTerrain==0?"Normal":selectedTerrain==1?"Island":selectedTerrain==2?"Tower":"Falling");
+        string modName=(selectedModifier==0?"None":selectedModifier==1?"Speed":selectedModifier==2?"Moon":selectedModifier==3?"Dark":selectedModifier==4?"Monster":selectedModifier==5?"Coins":selectedModifier==6?"Moving":"Blink");
+        s+="                    [ SELECT PLAYERS ]\n\n";
+        s+="                  "+terrName+" / "+modName+"\n\n";
+        s+="                    1. Solo\n";
+        s+="                    2. Versus\n\n\n";
+        s+="                       M to Back\n";
+    }else if(menuState==3){
+        string terrName=(selectedTerrain==0?"Normal":selectedTerrain==1?"Island":selectedTerrain==2?"Tower":"Falling");
+        string modName=(selectedModifier==0?"None":selectedModifier==1?"Speed":selectedModifier==2?"Moon":selectedModifier==3?"Dark":selectedModifier==4?"Monster":selectedModifier==5?"Coins":selectedModifier==6?"Moving":"Blink");
+        string playerName=(selectedPlayerCount==1?"Solo":"Versus");
+        s+="                    [ SELECT DIFFICULTY ]\n\n";
+        s+="                  "+terrName+" / "+modName+" / "+playerName+"\n\n";
+        s+="                    1. Easy\n";
+        s+="                    2. Hard\n\n\n";
+        s+="                       M to Back\n";
+    }
+    s+="\033[J";
+    cout<<s;
+}
+
+void drawGameOverScreen(){
+    string s="\033[H\033[J";
+    s+="\033[38;2;255;255;255m";
+    string title;
+    if(gameOver)title="\033[38;2;255;50;50m      G A M E    O V E R      \033[0m";
+    else if(winType==0)title="\033[38;2;0;255;0m         Y O U  W I N         \033[0m";
+    else if(winType==1)title="\033[38;2;255;215;0m       C O M P L E T E !      \033[0m";
+    else title="\033[38;2;255;215;0m       P E R F E C T !        \033[0m";
+    if(is2PMode&&win){
+        if(winType==3)title="\033[38;2;255;0;0m       M A R I O  W I N       \033[0m";
+        else if(winType==4)title="\033[38;2;0;255;0m       L U I G I  W I N       \033[0m";
+        else if(winType==5)title="\033[38;2;255;215;0m        D R A W  !  !         \033[0m";
+    }else if(winType==6){
+        title="\033[38;2;255;215;0m       S P E E D  W I N       \033[0m";
+    }else if(winType==7){
+        title="\033[38;2;0;255;255m      F A L L I N G  W I N     \033[0m";
+    }
+    string modeName=is2PMode?"2-Player Battle":(isIslandMode?"Island":"Normal");
+    if(is2PMode){
+        if(isIslandMode)modeName="2P Island";
+        else if(isSpeedMode)modeName="2P Speed";
+        else if(isDarkMode)modeName="2P Dark";
+        else if(isMoonMode)modeName="2P Moon";
+        else if(isTowerMode)modeName="2P Tower";
+        else if(isFallingMode)modeName="2P Falling";
+        else if(isMonsterMode)modeName="2P Monster";
+        else if(isCoinsMode)modeName="2P Coins";
+        else if(isMovingPlatformMode)modeName="2P Moving";
+        else if(isBlinkMode)modeName="2P Blink";
+    }else{
+        if(isSpeedMode)modeName="Speed Rush";
+        if(isDarkMode)modeName="Dark Mode";
+        if(isMoonMode)modeName="Moon Gravity";
+        if(isTowerMode)modeName="Tower";
+        if(isFallingMode)modeName="Falling";
+        if(isMonsterMode)modeName="Monster Mode";
+        if(isCoinsMode)modeName="Coins Mode";
+        if(isMovingPlatformMode)modeName="Moving Platform";
+        if(isBlinkMode)modeName="Blink Platform";
+    }
+    s+="\n\n\n";
+    s+="              ==============================\n";
+    s+="              "+title+"\n";
+    s+="              ==============================\n\n";
+    char stats[128];
+    if(is2PMode)snprintf(stats,sizeof(stats),"              Mario: %d pts  |  Luigi: %d pts\n              Total Coins: %d/%d\n",p1Score,p2Score,collectedCoins,totalCoins);
+    else snprintf(stats,sizeof(stats),"                 Mode: [%s]\n                 Score: %d | Coins: %d/%d\n",modeName.c_str(),score,collectedCoins,totalCoins);
+    s+=stats;
+    s+="\n              \033[38;2;0;255;0m[SPACE]\033[0m Restart (Current Mode)\n";
+    s+="              \033[38;2;255;215;0m[M]\033[0m Main Menu   \033[38;2;255;215;0m[Q]\033[0m Quit Game\n\n";
+    s+="\033[J";
+    cout<<s;
+}
+
+void drawGame(){
+    string s="\033[H";
+    bool p1Visible,p2Visible;
+    for(int y=0;y<H;y++){
+        int wy=y+camY;
+        for(int x=0;x<W;x++){
+            int wx=x+camX;
+            if(wx<0||wx>=curMapW||wy<0||wy>=curMapH){s+=" ";continue;}
+            if(isDarkMode&&!isFallingMode){
+                p1Visible=abs(wx-p1X)<=6&&abs(wy-p1Y)<=4;
+                p2Visible=is2PMode&&p2Alive&&abs(wx-p2X)<=6&&abs(wy-p2Y)<=4;
+                if(!p1Visible&&!p2Visible){s+=" ";continue;}
+            }
+            bool printed=false;
+            if(p1Alive&&p1X==wx&&p1Y==wy){
+                if(p1Inv==0||(p1Inv>0&&gameTicks%4<2))s+="\033[38;2;255;0;0mM\033[0m";
+                else s+=" ";
+                printed=true;
+            }else if(is2PMode&&p2Alive&&p2X==wx&&p2Y==wy){
+                if(p2Inv==0||(p2Inv>0&&gameTicks%4<2))s+="\033[38;2;0;255;0mL\033[0m";
+                else s+=" ";
+                printed=true;
+            }else if(!p1Alive&&p1X==wx&&p1Y-1==wy){s+="X";printed=true;}
+            else if(is2PMode&&!p2Alive&&p2X==wx&&p2Y-1==wy){s+="X";printed=true;}
+            if(printed)continue;
+
+            bool splatPrinted=false;
+            for(int i=0;i<splatCount;i++){
+                if(splats[i].x==wx&&splats[i].y==wy){
+                    s+="\033[38;2;255;255;0m+\033[0m";
+                    splatPrinted=true;
+                    break;
+                }
+            }
+            if(splatPrinted)continue;
+
+            bool mPrinted=false;
+            for(int i=0;i<monsterCount;i++){
+                if(!monsters[i].alive)continue;
+                if(!monsters[i].falling&&isOnHiddenPhase(monsters[i].x,monsters[i].y))continue;
+                if(monsters[i].x==wx&&monsters[i].y==wy){
+                    s+="\033[38;2;0;150;255mG\033[0m";
+                    mPrinted=true;
+                    break;
+                }
+            }
+            if(mPrinted)continue;
+
+            bool mpPrinted=false;
+            for(int i=0;i<mpCount;i++){
+                if(!mps[i].visible)continue;
+                if(wy==mps[i].y&&wx>=mps[i].x&&wx<mps[i].x+mps[i].len){
+                    if(mps[i].type==2){
+                        char digit='0'+(mps[i].life>9?9:mps[i].life);
+                        s+="\033[38;2;255;215;0m";
+                        s+=digit;
+                        s+="\033[0m";
+                    }else if(mps[i].type==1){
+                        s+="\033[38;2;0;255;255m~\033[0m";
+                    }else{
+                        s+="\033[38;2;255;0;255m*\033[0m";
+                    }
+                    mpPrinted=true;
+                    break;
+                }
+            }
+            if(mpPrinted)continue;
+
+            bool platCoinPrinted=false;
+            for(int i=0;i<mpCount;i++){
+                if(!mps[i].hasCoin||!mps[i].visible)continue;
+                if(mps[i].y-1!=wy)continue;
+                if(wx<mps[i].x||wx>=mps[i].x+mps[i].len)continue;
+                int bit=wx-mps[i].x;
+                if(mps[i].coinMask&(1<<bit)){
+                    s+="\033[38;2;255;215;0mo\033[0m";
+                    platCoinPrinted=true;
+                    break;
+                }
+            }
+            if(platCoinPrinted)continue;
+
+            char c=map[wy][wx];
+            if(c=='#')s+="\033[38;2;139;69;19m#\033[0m";
+            else if(c=='=')s+="\033[38;2;255;165;0m=\033[0m";
+            else if(c=='o')s+="\033[38;2;255;215;0mo\033[0m";
+            else if(c=='S')s+="\033[38;2;255;215;0m\xE2\x98\x86\033[0m";
+            else s+=c;
+        }
+        s+="\033[K\n";
+    }
+
+    char hud[256];
+    if(isFallingMode){
+        if(is2PMode)snprintf(hud,sizeof(hud),"[Falling] Mario: %d | Luigi: %d | Coins: %d/%d | Kills: %d/%d",p1Y,p2Y,collectedCoins,totalCoins,monstersKilled,totalMonsters);
+        else snprintf(hud,sizeof(hud),"[Falling] Depth: %d/%d | Score: %d | Coins: %d/%d | Kills: %d/%d",p1Y,curMapH-10,score,collectedCoins,totalCoins,monstersKilled,totalMonsters);
+    }else if(isTowerMode){
+        if(isSpeedMode){
+            if(is2PMode)snprintf(hud,sizeof(hud),"\033[38;2;255;50;50mTIME: %.1fs\033[0m | 2P Tower | Mario: %d | Luigi: %d | Coins: %d/%d | Kills: %d/%d",timeLeft/25.0,p1Score,p2Score,collectedCoins,totalCoins,monstersKilled,totalMonsters);
+            else snprintf(hud,sizeof(hud),"\033[38;2;255;50;50mTIME: %.1fs\033[0m | Tower | Score: %d | Coins: %d/%d | Kills: %d/%d  Climb to the Star!",timeLeft/25.0,score,collectedCoins,totalCoins,monstersKilled,totalMonsters);
+        }else if(is2PMode){
+            snprintf(hud,sizeof(hud),"2P Tower | Mario: %d | Luigi: %d | Coins: %d/%d | Kills: %d/%d",p1Score,p2Score,collectedCoins,totalCoins,monstersKilled,totalMonsters);
+        }else{
+            snprintf(hud,sizeof(hud),"Tower | Score: %d | Coins: %d/%d | Kills: %d/%d  Climb to the Star!",score,collectedCoins,totalCoins,monstersKilled,totalMonsters);
+        }
+    }else if(is2PMode){
+        if(isSpeedMode)snprintf(hud,sizeof(hud),"\033[38;2;255;50;50mTIME: %.1fs\033[0m | Mario: %d | Luigi: %d | Coins: %d/%d",timeLeft/25.0,p1Score,p2Score,collectedCoins,totalCoins);
+        else if(isMonsterMode)snprintf(hud,sizeof(hud),"[Monster] Mario: %d | Luigi: %d | Coins: %d/%d | Kills: %d/%d",p1Score,p2Score,collectedCoins,totalCoins,monstersKilled,totalMonsters);
+        else if(isCoinsMode)snprintf(hud,sizeof(hud),"[Coins] Mario: %d | Luigi: %d | Coins: %d/%d",p1Score,p2Score,collectedCoins,totalCoins);
+        else if(isMovingPlatformMode)snprintf(hud,sizeof(hud),"[Moving] Mario: %d | Luigi: %d | Coins: %d/%d | Kills: %d/%d",p1Score,p2Score,collectedCoins,totalCoins,monstersKilled,totalMonsters);
+        else if(isBlinkMode)snprintf(hud,sizeof(hud),"[Blink] Mario: %d | Luigi: %d | Coins: %d/%d | Kills: %d/%d",p1Score,p2Score,collectedCoins,totalCoins,monstersKilled,totalMonsters);
+        else snprintf(hud,sizeof(hud),"Mario: %d pts | Luigi: %d pts | Coins: %d/%d",p1Score,p2Score,collectedCoins,totalCoins);
+    }else if(isSpeedMode)snprintf(hud,sizeof(hud),"\033[38;2;255;50;50mTIME: %.1fs\033[0m | Score: %d | Coins: %d/%d",timeLeft/25.0,score,collectedCoins,totalCoins);
+    else if(isMonsterMode)snprintf(hud,sizeof(hud),"[Monster] Score: %d | Coins: %d/%d | Kills: %d/%d",score,collectedCoins,totalCoins,monstersKilled,totalMonsters);
+    else if(isCoinsMode)snprintf(hud,sizeof(hud),"[Coins] Score: %d | Coins: %d/%d",score,collectedCoins,totalCoins);
+    else if(isMovingPlatformMode)snprintf(hud,sizeof(hud),"[Moving] Score: %d | Coins: %d/%d | Kills: %d/%d",score,collectedCoins,totalCoins,monstersKilled,totalMonsters);
+    else if(isBlinkMode)snprintf(hud,sizeof(hud),"[Blink] Score: %d | Coins: %d/%d | Kills: %d/%d",score,collectedCoins,totalCoins,monstersKilled,totalMonsters);
+    else snprintf(hud,sizeof(hud),"[%s] Score: %d/800 | Coins: %d/%d | Kills: %d/%d",isDarkMode?"Dark":(isMoonMode?"Moon":(isIslandMode?"Island":"Normal")),score,collectedCoins,totalCoins,monstersKilled,totalMonsters);
+
+    s+="\033[38;2;255;255;255m";
+    if(isSleeping){
+        s+="\033[38;2;255;215;0mSLEEPING - press [c] to continue\033[0m";
+        s+="\033[K";
+    }else{
+        s+=hud;
+        s+="\033[K";
+    }
+    cout<<s;
+}
+
+void startGameFromMenu(){
+    is2PMode=(selectedPlayerCount==2);
+    isIslandMode=(selectedTerrain==1);
+    isTowerMode=(selectedTerrain==2);
+    isFallingMode=(selectedTerrain==3);
+    isSpeedMode=(selectedModifier==1);
+    isMoonMode=(selectedModifier==2);
+    isDarkMode=(selectedModifier==3);
+    isMonsterMode=(selectedModifier==4);
+    isCoinsMode=(selectedModifier==5);
+    isMovingPlatformMode=(selectedModifier==6);
+    isBlinkMode=(selectedModifier==7);
+    gameStarted=true;
+}
+
+int main(){
+    srand(time(0));
+    initConsole();
+    initAudio();
+    while(true){
+        gameStarted=false;
+        while(!gameStarted){
+            playBGM("menu.wav");
+            drawMenu();
+            if(menuState==0){
+                if(keyDown('1')){selectedTerrain=0;menuState=1;Sleep(120);}
+                else if(keyDown('2')){selectedTerrain=1;menuState=1;Sleep(120);}
+                else if(keyDown('3')){selectedTerrain=2;menuState=1;Sleep(120);}
+                else if(keyDown('4')){selectedTerrain=3;menuState=1;Sleep(120);}
+                else if(keyDown('Q')||keyDown('q')){stopBGM();return 0;}
+            }else if(menuState==1){
+                if(keyDown('1')){selectedModifier=0;menuState=2;Sleep(120);}
+                else if(keyDown('2')){selectedModifier=1;menuState=2;Sleep(120);}
+                else if(keyDown('3')){selectedModifier=2;menuState=2;Sleep(120);}
+                else if(keyDown('4')){selectedModifier=3;menuState=2;Sleep(120);}
+                else if(keyDown('5')){selectedModifier=4;menuState=2;Sleep(120);}
+                else if(keyDown('6')){selectedModifier=5;menuState=2;Sleep(120);}
+                else if(keyDown('7')){selectedModifier=6;menuState=2;Sleep(120);}
+                else if(keyDown('8')){selectedModifier=7;menuState=2;Sleep(120);}
+                else if(keyDown('M')){menuState=0;Sleep(120);}
+            }else if(menuState==2){
+                if(keyDown('1')){selectedPlayerCount=1;menuState=3;Sleep(120);}
+                else if(keyDown('2')){selectedPlayerCount=2;menuState=3;Sleep(120);}
+                else if(keyDown('M')){menuState=1;Sleep(120);}
+            }else if(menuState==3){
+                if(keyDown('1')){isEasyMode=true;startGameFromMenu();}
+                else if(keyDown('2')){isEasyMode=false;startGameFromMenu();}
+                else if(keyDown('M')){menuState=2;Sleep(120);}
+            }
+            Sleep(50);
+        }
+        resetGame();
+        cout<<"\033[H\033[J";
+        bool lastGameOverState=false;
+        while(gameStarted){
+            update();
+            if(!gameStarted)break;
+            if(!gameOver&&!win){
+                drawGame();
+                lastGameOverState=false;
+            }else if(!lastGameOverState){
+                playBGM("gameover.wav");
+                drawGameOverScreen();
+                lastGameOverState=true;
+            }
+            Sleep(40);
+        }
+    }
+    return 0;
+}
